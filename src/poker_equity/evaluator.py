@@ -1,0 +1,250 @@
+"""Five-card poker hand evaluator.
+
+This module provides :func:`evaluate_5`, which takes exactly five
+:class:`~poker_equity.card.Card` objects and returns a :class:`HandResult`
+describing the best poker hand they form.
+
+The implementation uses **bit-manipulation** for flush and straight
+detection:
+
+* **Flush**: all five cards share the same suit — a single equality check.
+* **Straight**: each rank maps to a bit position; five consecutive set bits
+  form a straight.  The wheel (A-2-3-4-5) is handled as a special case.
+
+Pair / trips / quads detection uses a :class:`~collections.Counter` on the
+rank values, then classifies by the resulting frequency pattern.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from typing import Sequence
+
+from poker_equity.card import Card, Rank
+from poker_equity.hand_rank import HandRank, HandResult
+
+# =========================================================================
+# Rank name helpers (for building description strings)
+# =========================================================================
+
+_RANK_NAMES: dict[int, str] = {
+    2: "Twos", 3: "Threes", 4: "Fours", 5: "Fives",
+    6: "Sixes", 7: "Sevens", 8: "Eights", 9: "Nines",
+    10: "Tens", 11: "Jacks", 12: "Queens", 13: "Kings", 14: "Aces",
+}
+
+_RANK_NAME_SINGULAR: dict[int, str] = {
+    2: "Two", 3: "Three", 4: "Four", 5: "Five",
+    6: "Six", 7: "Seven", 8: "Eight", 9: "Nine",
+    10: "Ten", 11: "Jack", 12: "Queen", 13: "King", 14: "Ace",
+}
+
+_RANK_CHAR: dict[int, str] = {
+    2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9",
+    10: "T", 11: "J", 12: "Q", 13: "K", 14: "A",
+}
+
+
+def _high_label(rank_val: int) -> str:
+    """Return e.g. ``'Ace'`` for 14, ``'King'`` for 13."""
+    return _RANK_NAME_SINGULAR[rank_val]
+
+
+# =========================================================================
+# Core evaluation helpers
+# =========================================================================
+
+
+def _is_flush(cards: Sequence[Card]) -> bool:
+    """Return ``True`` if all five cards share the same suit."""
+    suit = cards[0].suit
+    return all(c.suit == suit for c in cards[1:])
+
+
+def _straight_high(ranks_desc: tuple[int, ...]) -> int | None:
+    """Return the high card of the straight, or ``None`` if not a straight.
+
+    Parameters
+    ----------
+    ranks_desc:
+        The five rank values in **descending** order (duplicates already
+        removed by the caller — if there are fewer than 5 unique ranks
+        this is not a straight).
+
+    Returns
+    -------
+    int | None
+        The rank value of the highest card in the straight, or ``None``.
+        For the wheel (A-2-3-4-5), returns ``5``.
+    """
+    if len(ranks_desc) != 5:
+        return None
+
+    # Build a bitmask: bit i is set if rank i is present
+    bitmask = 0
+    for r in ranks_desc:
+        bitmask |= 1 << r
+
+    # Normal straight: five consecutive bits
+    high = ranks_desc[0]
+    straight_mask = 0
+    for i in range(5):
+        straight_mask |= 1 << (high - i)
+    if bitmask == straight_mask:
+        return high
+
+    # Wheel (A-2-3-4-5): Ace acts as 1
+    wheel_mask = (1 << 14) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
+    if bitmask == wheel_mask:
+        return 5  # 5-high straight
+
+    return None
+
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+
+def evaluate_5(cards: Sequence[Card]) -> HandResult:
+    """Evaluate a five-card poker hand.
+
+    Parameters
+    ----------
+    cards:
+        Exactly five :class:`Card` objects.
+
+    Returns
+    -------
+    HandResult
+        The evaluated hand with rank, sub-rank (for tie-breaking), and a
+        human-readable description.
+
+    Raises
+    ------
+    ValueError
+        If *cards* does not contain exactly five cards.
+    """
+    if len(cards) != 5:
+        msg = f"evaluate_5 requires exactly 5 cards, got {len(cards)}"
+        raise ValueError(msg)
+
+    # Extract rank values and sort descending
+    rank_values = sorted((c.rank.value for c in cards), reverse=True)
+    flush = _is_flush(cards)
+
+    # Count rank frequencies: {rank_value: count}
+    counts = Counter(rank_values)
+    # Sort by (count desc, rank desc) for classification
+    freq = sorted(counts.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    freq_pattern = tuple(f[1] for f in freq)  # e.g. (2, 1, 1, 1) for one pair
+
+    unique_desc = tuple(r for r, _ in freq)  # unique ranks, ordered by freq then rank
+    ranks_desc = tuple(sorted(set(rank_values), reverse=True))
+
+    # Check for straight
+    straight_high = _straight_high(ranks_desc)
+
+    # -----------------------------------------------------------------
+    # Classify the hand (from strongest to weakest)
+    # -----------------------------------------------------------------
+
+    # --- Royal Flush / Straight Flush ---
+    if flush and straight_high is not None:
+        if straight_high == 14:  # A-K-Q-J-T
+            return HandResult(
+                rank=HandRank.ROYAL_FLUSH,
+                sub_rank=(),
+                description="Royal Flush",
+            )
+        high_name = _high_label(straight_high)
+        return HandResult(
+            rank=HandRank.STRAIGHT_FLUSH,
+            sub_rank=(straight_high,),
+            description=f"Straight Flush, {high_name}-high",
+        )
+
+    # --- Four of a Kind ---
+    if freq_pattern == (4, 1):
+        quads_rank = freq[0][0]
+        kicker = freq[1][0]
+        return HandResult(
+            rank=HandRank.FOUR_OF_A_KIND,
+            sub_rank=(quads_rank, kicker),
+            description=f"Four of a Kind, {_RANK_NAMES[quads_rank]}",
+        )
+
+    # --- Full House ---
+    if freq_pattern == (3, 2):
+        trips_rank = freq[0][0]
+        pair_rank = freq[1][0]
+        return HandResult(
+            rank=HandRank.FULL_HOUSE,
+            sub_rank=(trips_rank, pair_rank),
+            description=(
+                f"Full House, {_RANK_NAMES[trips_rank]} full of "
+                f"{_RANK_NAMES[pair_rank]}"
+            ),
+        )
+
+    # --- Flush ---
+    if flush:
+        sub = tuple(rank_values)  # already sorted desc
+        return HandResult(
+            rank=HandRank.FLUSH,
+            sub_rank=sub,
+            description=f"Flush, {_high_label(sub[0])}-high",
+        )
+
+    # --- Straight ---
+    if straight_high is not None:
+        high_name = _high_label(straight_high)
+        return HandResult(
+            rank=HandRank.STRAIGHT,
+            sub_rank=(straight_high,),
+            description=f"Straight, {high_name}-high",
+        )
+
+    # --- Three of a Kind ---
+    if freq_pattern == (3, 1, 1):
+        trips_rank = freq[0][0]
+        kickers = tuple(sorted((freq[1][0], freq[2][0]), reverse=True))
+        return HandResult(
+            rank=HandRank.THREE_OF_A_KIND,
+            sub_rank=(trips_rank, *kickers),
+            description=f"Three of a Kind, {_RANK_NAMES[trips_rank]}",
+        )
+
+    # --- Two Pair ---
+    if freq_pattern == (2, 2, 1):
+        high_pair = max(freq[0][0], freq[1][0])
+        low_pair = min(freq[0][0], freq[1][0])
+        kicker = freq[2][0]
+        return HandResult(
+            rank=HandRank.TWO_PAIR,
+            sub_rank=(high_pair, low_pair, kicker),
+            description=(
+                f"Two Pair, {_RANK_NAMES[high_pair]} and "
+                f"{_RANK_NAMES[low_pair]}"
+            ),
+        )
+
+    # --- One Pair ---
+    if freq_pattern == (2, 1, 1, 1):
+        pair_rank = freq[0][0]
+        kickers = tuple(sorted(
+            (freq[1][0], freq[2][0], freq[3][0]), reverse=True
+        ))
+        return HandResult(
+            rank=HandRank.ONE_PAIR,
+            sub_rank=(pair_rank, *kickers),
+            description=f"Pair of {_RANK_NAMES[pair_rank]}",
+        )
+
+    # --- High Card ---
+    sub = tuple(rank_values)
+    return HandResult(
+        rank=HandRank.HIGH_CARD,
+        sub_rank=sub,
+        description=f"{_high_label(sub[0])}-high",
+    )
