@@ -1,8 +1,12 @@
-"""Five-card poker hand evaluator.
+"""Five-, six-, and seven-card poker hand evaluator.
 
-This module provides :func:`evaluate_5`, which takes exactly five
-:class:`~poker_equity.card.Card` objects and returns a :class:`HandResult`
-describing the best poker hand they form.
+This module provides:
+
+* :func:`evaluate_5` — evaluate exactly five cards.
+* :func:`evaluate_7` — evaluate seven cards by picking the best 5-card
+  combination out of C(7, 5) = 21 possibilities.
+* :func:`evaluate_hand` — convenience dispatcher that accepts 5, 6, or 7
+  cards.
 
 The implementation uses **bit-manipulation** for flush and straight
 detection:
@@ -18,6 +22,7 @@ rank values, then classifies by the resulting frequency pattern.
 from __future__ import annotations
 
 from collections import Counter
+from itertools import combinations
 from typing import Sequence
 
 from poker_equity.card import Card, Rank
@@ -248,3 +253,84 @@ def evaluate_5(cards: Sequence[Card]) -> HandResult:
         sub_rank=sub,
         description=f"{_high_label(sub[0])}-high",
     )
+
+
+def evaluate_7(cards: Sequence[Card]) -> HandResult:
+    """Evaluate a seven-card poker hand (e.g. 2 hole + 5 board).
+
+    Iterates over all C(7, 5) = 21 five-card combinations and returns
+    the best :class:`HandResult`.
+
+    Parameters
+    ----------
+    cards:
+        Exactly seven :class:`Card` objects.
+
+    Returns
+    -------
+    HandResult
+        The best possible 5-card hand from the seven cards.
+
+    Raises
+    ------
+    ValueError
+        If *cards* does not contain exactly seven cards.
+    """
+    if len(cards) != 7:
+        msg = f"evaluate_7 requires exactly 7 cards, got {len(cards)}"
+        raise ValueError(msg)
+
+    best: HandResult | None = None
+    for combo in combinations(cards, 5):
+        result = evaluate_5(combo)
+        if best is None or result > best:
+            best = result
+
+    assert best is not None  # guaranteed with 7 cards
+    return best
+
+
+def evaluate_hand(cards: Sequence[Card]) -> HandResult:
+    """Evaluate a poker hand of 5, 6, or 7 cards.
+
+    This is a convenience dispatcher:
+
+    * **5 cards** → calls :func:`evaluate_5` directly.
+    * **6 cards** → picks the best of C(6, 5) = 6 five-card combos.
+    * **7 cards** → calls :func:`evaluate_7` (best of 21 combos).
+
+    Parameters
+    ----------
+    cards:
+        Five, six, or seven :class:`Card` objects.
+
+    Returns
+    -------
+    HandResult
+        The best possible 5-card hand from the given cards.
+
+    Raises
+    ------
+    ValueError
+        If the number of cards is not 5, 6, or 7.
+    """
+    n = len(cards)
+
+    if n == 5:
+        return evaluate_5(cards)
+
+    if n == 7:
+        return evaluate_7(cards)
+
+    if n == 6:
+        best: HandResult | None = None
+        for combo in combinations(cards, 5):
+            result = evaluate_5(combo)
+            if best is None or result > best:
+                best = result
+        assert best is not None
+        return best
+
+    msg = f"evaluate_hand requires 5, 6, or 7 cards, got {n}"
+    raise ValueError(msg)
+
