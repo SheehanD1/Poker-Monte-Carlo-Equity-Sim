@@ -334,3 +334,163 @@ def evaluate_hand(cards: Sequence[Card]) -> HandResult:
     msg = f"evaluate_hand requires 5, 6, or 7 cards, got {n}"
     raise ValueError(msg)
 
+
+# =========================================================================
+# Fast score-based evaluation (lookup-table hot path)
+# =========================================================================
+#
+# These functions return a single integer score instead of a HandResult.
+# Higher score = better hand.  They are the primary evaluation path used
+# by the Monte Carlo simulator, where constructing HandResult objects
+# (with description strings) for millions of hands would be wasteful.
+#
+# The lookup tables are imported lazily (on first call) to avoid a
+# circular import with lookup.py, which uses evaluate_5 during table
+# generation.
+# =========================================================================
+
+_FLUSH_TABLE: dict[int, int] | None = None
+_UNSUITED_TABLE: dict[int, int] | None = None
+_RANK_PRIMES: dict[int, int] | None = None
+
+
+def _ensure_tables() -> tuple[dict[int, int], dict[int, int], dict[int, int]]:
+    """Lazy-load the lookup tables on first use."""
+    global _FLUSH_TABLE, _UNSUITED_TABLE, _RANK_PRIMES  # noqa: PLW0603
+    if _FLUSH_TABLE is None:
+        from poker_equity.lookup import FLUSH_TABLE, RANK_PRIMES, UNSUITED_TABLE
+
+        _FLUSH_TABLE = FLUSH_TABLE
+        _UNSUITED_TABLE = UNSUITED_TABLE
+        _RANK_PRIMES = RANK_PRIMES
+    assert _UNSUITED_TABLE is not None
+    assert _RANK_PRIMES is not None
+    return _FLUSH_TABLE, _UNSUITED_TABLE, _RANK_PRIMES
+
+
+def score_5(cards: Sequence[Card]) -> int:
+    """Score a 5-card hand using O(1) lookup tables.
+
+    This is the **fast path** for Monte Carlo simulation — it returns a
+    single integer score instead of a full :class:`HandResult`.
+
+    Parameters
+    ----------
+    cards:
+        Exactly five :class:`Card` objects.
+
+    Returns
+    -------
+    int
+        An integer score where **higher is better**.  Scores range from
+        1 (worst high card: 7-5-4-3-2) to 7462 (Royal Flush).
+    """
+    flush_t, unsuited_t, primes = _ensure_tables()
+
+    # Flush check: all five cards same suit
+    suit = cards[0].suit
+    is_flush = all(c.suit == suit for c in cards[1:])
+
+    if is_flush:
+        # Rank bitmask (one bit per unique rank)
+        mask = 0
+        for c in cards:
+            mask |= 1 << c.rank.value
+        return flush_t[mask]
+
+    # Prime product of rank values
+    product = 1
+    for c in cards:
+        product *= primes[c.rank.value]
+    return unsuited_t[product]
+
+
+def score_7(cards: Sequence[Card]) -> int:
+    """Score a 7-card hand by finding the best 5-card score.
+
+    Iterates over all C(7, 5) = 21 five-card combinations and returns
+    the **highest** score.  This is the fast path used by the Monte Carlo
+    simulator.
+
+    Parameters
+    ----------
+    cards:
+        Exactly seven :class:`Card` objects.
+
+    Returns
+    -------
+    int
+        The best 5-card score from the seven cards.
+    """
+    flush_t, unsuited_t, primes = _ensure_tables()
+    best = 0
+
+    for combo in combinations(cards, 5):
+        # Inline the score_5 logic to avoid function-call overhead
+        suit = combo[0].suit
+        if all(c.suit == suit for c in combo[1:]):
+            mask = 0
+            for c in combo:
+                mask |= 1 << c.rank.value
+            score = flush_t[mask]
+        else:
+            product = 1
+            for c in combo:
+                product *= primes[c.rank.value]
+            score = unsuited_t[product]
+
+        if score > best:
+            best = score
+
+    return best
+
+
+def score_hand(cards: Sequence[Card]) -> int:
+    """Score a poker hand of 5, 6, or 7 cards using lookup tables.
+
+    This is the fast-path equivalent of :func:`evaluate_hand`.
+
+    Parameters
+    ----------
+    cards:
+        Five, six, or seven :class:`Card` objects.
+
+    Returns
+    -------
+    int
+        The best 5-card score from the given cards.
+
+    Raises
+    ------
+    ValueError
+        If the number of cards is not 5, 6, or 7.
+    """
+    n = len(cards)
+
+    if n == 5:
+        return score_5(cards)
+
+    if n == 7:
+        return score_7(cards)
+
+    if n == 6:
+        flush_t, unsuited_t, primes = _ensure_tables()
+        best = 0
+        for combo in combinations(cards, 5):
+            suit = combo[0].suit
+            if all(c.suit == suit for c in combo[1:]):
+                mask = 0
+                for c in combo:
+                    mask |= 1 << c.rank.value
+                score = flush_t[mask]
+            else:
+                product = 1
+                for c in combo:
+                    product *= primes[c.rank.value]
+                score = unsuited_t[product]
+            if score > best:
+                best = score
+        return best
+
+    msg = f"score_hand requires 5, 6, or 7 cards, got {n}"
+    raise ValueError(msg)
