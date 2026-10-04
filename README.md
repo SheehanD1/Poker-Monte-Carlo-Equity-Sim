@@ -104,15 +104,39 @@ ruff check src/ tests/
 ### Python API
 
 ```python
-from poker_equity.card import Card
-from poker_equity.deck import Deck
+from poker_equity import Card, Deck, evaluate_5, evaluate_7, score_7
 
 # Create cards from shorthand notation
-hero = [Card.from_str("Ah"), Card.from_str("Kh")]
-villain = [Card.from_str("Qs"), Card.from_str("Qd")]
-board = [Card.from_str("Th"), Card.from_str("9h"), Card.from_str("2c")]
+ace_hearts = Card.from_str("Ah")
+king_spades = Card.from_str("Ks")
 
-# Coming soon: Monte Carlo simulation
+# Evaluate a 5-card hand
+hand = [Card.from_str(s) for s in ["Ah", "Kh", "Qh", "Jh", "Th"]]
+result = evaluate_5(hand)
+print(result)               # "Royal Flush"
+print(result.rank.label)    # "Royal Flush"
+print(result.sub_rank)      # ()
+
+# Evaluate a 7-card hand (2 hole + 5 board)
+hero = [Card.from_str(s) for s in ["Ah", "Kh"]]
+board = [Card.from_str(s) for s in ["Qh", "Jh", "Th", "2c", "3d"]]
+result = evaluate_7(hero + board)
+print(result)               # "Royal Flush"
+
+# Fast scoring for Monte Carlo (integer comparison, ~5x faster)
+score = score_7(hero + board)
+print(score)                # 7462 (highest possible)
+
+# Deck operations
+deck = Deck(seed=42)
+deck.shuffle()
+cards = deck.deal(7)
+print(evaluate_7(cards))    # evaluates the dealt hand
+```
+
+### Monte Carlo Simulation (Coming Soon)
+
+```python
 # from poker_equity.simulation import calculate_equity
 # result = calculate_equity(hero, villain, board, num_sims=100_000)
 # print(f"Hero equity: {result.equity:.1%}")
@@ -178,22 +202,27 @@ pytest -m "not slow"
 Poker-Monte-Carlo-Equity-Sim/
 ├── src/
 │   └── poker_equity/
-│       ├── __init__.py        # Package root & public API
-│       ├── card.py            # Card, Rank, Suit primitives
-│       ├── deck.py            # Deck with shuffle, deal, remove
+│       ├── __init__.py        # Package root & public API (22 exports)
+│       ├── card.py            # Card, Rank, Suit immutable primitives
+│       ├── deck.py            # Deck with shuffle, deal, remove, reset
 │       ├── constants.py       # Shared constants & utility functions
-│       ├── evaluator.py       # Hand evaluation engine (coming soon)
+│       ├── hand_rank.py       # HandRank enum & HandResult dataclass
+│       ├── evaluator.py       # 5/6/7-card evaluators (rich + fast)
+│       ├── lookup.py          # Pre-computed O(1) lookup tables (7,462 ranks)
 │       ├── simulation.py      # Monte Carlo simulator (coming soon)
 │       ├── range.py           # Range parser & matrix (coming soon)
 │       ├── odds.py            # EV & pot odds (coming soon)
 │       └── api/               # FastAPI backend (coming soon)
 ├── tests/
-│   ├── conftest.py            # Shared fixtures
-│   ├── test_card.py           # Card/Rank/Suit tests
-│   └── test_deck.py           # Deck tests
+│   ├── conftest.py            # Shared fixtures & seeds
+│   ├── test_card.py           # Card/Rank/Suit tests (76 tests)
+│   ├── test_deck.py           # Deck tests (35 tests)
+│   ├── test_evaluator.py      # 5-card evaluator tests (59 tests)
+│   ├── test_evaluator_perf.py # Performance benchmarks (7 tests)
+│   └── test_lookup.py         # Lookup table & score tests (43 tests)
 ├── frontend/                  # Web UI (coming soon)
 ├── pyproject.toml             # Project metadata & tool config
-├── Makefile                   # Dev automation (coming soon)
+├── Makefile                   # Dev automation targets
 ├── LICENSE                    # MIT License
 └── README.md                  # You are here
 ```
