@@ -108,7 +108,7 @@ def _build_equity_result(
 
 def _validate_inputs(
     hero: Sequence[Card],
-    villain: Sequence[Card],
+    villain: Sequence[Card] | None,
     board: Sequence[Card],
 ) -> None:
     """Validate simulation inputs.
@@ -122,7 +122,7 @@ def _validate_inputs(
         msg = f"Hero must have exactly 2 hole cards, got {len(hero)}"
         raise ValueError(msg)
 
-    if len(villain) != 2:
+    if villain is not None and len(villain) != 2:
         msg = f"Villain must have exactly 2 hole cards, got {len(villain)}"
         raise ValueError(msg)
 
@@ -131,7 +131,10 @@ def _validate_inputs(
         raise ValueError(msg)
 
     # Check for duplicate cards
-    all_cards = list(hero) + list(villain) + list(board)
+    all_cards = list(hero) + list(board)
+    if villain is not None:
+        all_cards += list(villain)
+        
     if len(set(all_cards)) != len(all_cards):
         seen: set[Card] = set()
         for card in all_cards:
@@ -148,7 +151,7 @@ def _validate_inputs(
 
 def calculate_equity(
     hero: Sequence[Card],
-    villain: Sequence[Card],
+    villain: Sequence[Card] | None = None,
     board: Sequence[Card] | None = None,
     *,
     num_sims: int = 10_000,
@@ -166,7 +169,8 @@ def calculate_equity(
     hero:
         Hero's two hole cards.
     villain:
-        Villain's two hole cards.
+        Villain's two hole cards, or ``None`` to evaluate against a
+        random hand (any two unknown cards).
     board:
         Known community cards (0 to 5).  ``None`` or empty list means
         preflop (no board cards dealt yet).
@@ -205,7 +209,10 @@ def calculate_equity(
         raise ValueError(msg)
 
     # Build the stub deck: all 52 cards minus known cards
-    known_cards = set(hero) | set(villain) | set(board)
+    known_cards = set(hero) | set(board)
+    if villain is not None:
+        known_cards |= set(villain)
+        
     stub = [
         Card(rank, suit)
         for rank in _ALL_RANKS
@@ -214,36 +221,52 @@ def calculate_equity(
     ]
 
     board_list = list(board)
-    cards_to_deal = 5 - len(board_list)
-
-    # Pre-build the fixed parts of each 7-card hand
+    board_needed = 5 - len(board_list)
     hero_fixed = list(hero) + board_list
-    villain_fixed = list(villain) + board_list
-
+    
     rng = random.Random(seed)
     wins = 0
     ties = 0
     losses = 0
 
-    for _ in range(num_sims):
-        # Deal remaining community cards from the stub
-        dealt = rng.sample(stub, cards_to_deal)
+    if villain is not None:
+        # Fixed villain hand
+        villain_fixed = list(villain) + board_list
+        for _ in range(num_sims):
+            dealt = rng.sample(stub, board_needed)
+            hero_hand = hero_fixed + dealt
+            villain_hand = villain_fixed + dealt
 
-        # Build full 7-card hands
-        hero_hand = hero_fixed + dealt
-        villain_hand = villain_fixed + dealt
+            hero_score = score_7(hero_hand)
+            villain_score = score_7(villain_hand)
 
-        # Score both hands
-        hero_score = score_7(hero_hand)
-        villain_score = score_7(villain_hand)
+            if hero_score > villain_score:
+                wins += 1
+            elif hero_score == villain_score:
+                ties += 1
+            else:
+                losses += 1
+    else:
+        # Random villain hand (needs 2 extra cards)
+        cards_to_deal = board_needed + 2
+        for _ in range(num_sims):
+            dealt = rng.sample(stub, cards_to_deal)
+            
+            # First board_needed cards are the board, last 2 are villain hole cards
+            community_dealt = dealt[:board_needed]
+            
+            hero_hand = hero_fixed + community_dealt
+            villain_hand = board_list + dealt  # board_list + community_dealt + villain_hole
 
-        # Tally result
-        if hero_score > villain_score:
-            wins += 1
-        elif hero_score == villain_score:
-            ties += 1
-        else:
-            losses += 1
+            hero_score = score_7(hero_hand)
+            villain_score = score_7(villain_hand)
+
+            if hero_score > villain_score:
+                wins += 1
+            elif hero_score == villain_score:
+                ties += 1
+            else:
+                losses += 1
 
     return _build_equity_result(wins, ties, losses, num_sims)
 

@@ -192,3 +192,12 @@ class TestCalculateEquity:
         assert res.ties == 10
         assert res.losses == 0
         assert res.equity == 0.5
+
+    def test_known_equity_aa_vs_random(self) -> None:
+        """AA vs random hand should have around 85% equity."""
+        hero = [C("As"), C("Ad")]
+        
+        # Test with villain=None (random hand)
+        res = calculate_equity(hero, villain=None, num_sims=10_000, seed=101112)
+        
+        assert 0.83 < res.equity < 0.87
