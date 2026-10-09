@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from poker_equity.card import Card
-from poker_equity.simulation import EquityResult, _build_equity_result, calculate_equity
+from poker_equity.simulation import EquityResult, _build_equity_result, calculate_equity, calculate_equities
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -201,3 +201,77 @@ class TestCalculateEquity:
         res = calculate_equity(hero, villain=None, num_sims=10_000, seed=101112)
         
         assert 0.83 < res.equity < 0.87
+
+
+# =========================================================================
+# Multi-way Simulation Tests
+# =========================================================================
+
+
+class TestCalculateEquities:
+    def test_three_way_equity_sum(self) -> None:
+        """Equities in a 3-way pot should sum to exactly 1.0."""
+        hands = [
+            [C("Ah"), C("Kh")],
+            [C("Qs"), C("Qd")],
+            [C("7c"), C("2c")],
+        ]
+        results = calculate_equities(hands, num_sims=1_000, seed=333)
+        
+        assert len(results) == 3
+        total_equity = sum(r.equity for r in results)
+        assert pytest.approx(total_equity) == 1.0
+
+    def test_four_way_known_equities(self) -> None:
+        """Test a known 4-way spot: AA vs KK vs QQ vs JJ preflop."""
+        hands = [
+            [C("As"), C("Ac")],
+            [C("Ks"), C("Kc")],
+            [C("Qs"), C("Qc")],
+            [C("Js"), C("Jc")],
+        ]
+        
+        # AA should be around ~56%, KK ~22%, QQ ~14%, JJ ~8%
+        results = calculate_equities(hands, num_sims=10_000, seed=444)
+        
+        assert len(results) == 4
+        assert 0.52 < results[0].equity < 0.58
+        assert 0.15 < results[1].equity < 0.20
+        assert 0.11 < results[2].equity < 0.17
+        assert 0.10 < results[3].equity < 0.15
+        
+        assert pytest.approx(sum(r.equity for r in results)) == 1.0
+
+    def test_three_way_with_random_hand(self) -> None:
+        """Test multi-way pot where one player has a random hand."""
+        hands = [
+            [C("Ah"), C("Kh")],
+            [C("Qs"), C("Qd")],
+            None,  # Random hand
+        ]
+        results = calculate_equities(hands, num_sims=10_000, seed=555)
+        
+        assert len(results) == 3
+        assert pytest.approx(sum(r.equity for r in results)) == 1.0
+        # AKs and QQ should still have the vast majority of the equity
+        assert results[0].equity > 0.35
+        assert results[1].equity > 0.35
+
+    def test_three_way_chop(self) -> None:
+        """Test a multi-way spot with an inevitable 3-way chop."""
+        hands = [
+            [C("2s"), C("3s")],
+            [C("4s"), C("5s")],
+            [C("6s"), C("7s")],
+        ]
+        board = [C("Ah"), C("Kh"), C("Qh"), C("Jh"), C("Th")]  # Royal flush on board
+        
+        results = calculate_equities(hands, board, num_sims=10)
+        
+        assert len(results) == 3
+        assert results[0].wins == 0
+        assert results[0].ties == 10
+        assert pytest.approx(results[0].equity) == 1/3
+        assert pytest.approx(results[1].equity) == 1/3
+        assert pytest.approx(results[2].equity) == 1/3
+        assert pytest.approx(sum(r.equity for r in results)) == 1.0
