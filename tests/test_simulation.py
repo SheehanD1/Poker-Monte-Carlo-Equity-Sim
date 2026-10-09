@@ -22,7 +22,7 @@ C = Card.from_str
 class TestEquityResult:
     def test_build_equity_result(self) -> None:
         """Test calculation of percentages and equity."""
-        result = _build_equity_result(wins=50, ties=10, losses=40, num_sims=100)
+        result = _build_equity_result(wins=50, ties=10, losses=40, num_sims=100, equity=0.55)
         assert result.wins == 50
         assert result.ties == 10
         assert result.losses == 40
@@ -34,13 +34,13 @@ class TestEquityResult:
 
     def test_str_representation(self) -> None:
         """Test the human-readable string representation."""
-        result = _build_equity_result(wins=691, ties=5, losses=304, num_sims=1000)
+        result = _build_equity_result(wins=691, ties=5, losses=304, num_sims=1000, equity=0.6935)
         expected = "Equity: 69.3% | Win: 69.1% | Tie: 0.5% | Lose: 30.4% | (1,000 sims)"
         assert str(result) == expected
 
     def test_repr_representation(self) -> None:
         """Test the developer representation."""
-        result = _build_equity_result(wins=50, ties=10, losses=40, num_sims=100)
+        result = _build_equity_result(wins=50, ties=10, losses=40, num_sims=100, equity=0.55)
         assert repr(result) == (
             "EquityResult(equity=0.5500, win=0.5000, tie=0.1000, loss=0.4000, sims=100)"
         )
@@ -55,13 +55,13 @@ class TestCalculateEquityValidation:
     def test_hero_must_have_exactly_two_cards(self) -> None:
         hero = [C("Ah")]
         villain = [C("Ks"), C("Kd")]
-        with pytest.raises(ValueError, match="Hero must have exactly 2 hole cards"):
+        with pytest.raises(ValueError, match="Player 1 must have exactly 2 hole cards"):
             calculate_equity(hero, villain, num_sims=10)
 
     def test_villain_must_have_exactly_two_cards(self) -> None:
         hero = [C("Ah"), C("Kh")]
         villain = [C("Ks"), C("Kd"), C("Kc")]
-        with pytest.raises(ValueError, match="Villain must have exactly 2 hole cards"):
+        with pytest.raises(ValueError, match="Player 2 must have exactly 2 hole cards"):
             calculate_equity(hero, villain, num_sims=10)
 
     def test_board_cannot_have_more_than_five_cards(self) -> None:

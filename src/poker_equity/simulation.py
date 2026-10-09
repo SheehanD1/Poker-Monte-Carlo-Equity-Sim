@@ -41,16 +41,15 @@ class EquityResult:
     Attributes
     ----------
     wins : int
-        Number of simulations where hero won.
+        Number of simulations where player won outright.
     ties : int
-        Number of simulations where hero tied with villain.
+        Number of simulations where player split the pot.
     losses : int
-        Number of simulations where hero lost.
+        Number of simulations where player lost.
     num_sims : int
         Total number of simulations run.
     equity : float
-        Hero's equity: ``wins / num_sims + ties / (2 * num_sims)``.
-        Ties count as half a win.
+        Player's equity (expected share of the pot).
     win_pct : float
         Win percentage: ``wins / num_sims``.
     tie_pct : float
@@ -86,7 +85,7 @@ class EquityResult:
 
 
 def _build_equity_result(
-    wins: int, ties: int, losses: int, num_sims: int
+    wins: int, ties: int, losses: int, num_sims: int, equity: float
 ) -> EquityResult:
     """Construct an EquityResult from raw counts."""
     return EquityResult(
@@ -94,7 +93,7 @@ def _build_equity_result(
         ties=ties,
         losses=losses,
         num_sims=num_sims,
-        equity=(wins + ties / 2) / num_sims,
+        equity=equity,
         win_pct=wins / num_sims,
         tie_pct=ties / num_sims,
         loss_pct=losses / num_sims,
@@ -106,35 +105,29 @@ def _build_equity_result(
 # =========================================================================
 
 
-def _validate_inputs(
-    hero: Sequence[Card],
-    villain: Sequence[Card] | None,
+def _validate_multi_inputs(
+    hands: Sequence[Sequence[Card] | None],
     board: Sequence[Card],
 ) -> None:
-    """Validate simulation inputs.
-
-    Raises
-    ------
-    ValueError
-        If any input is invalid (wrong card count, duplicates, etc.).
-    """
-    if len(hero) != 2:
-        msg = f"Hero must have exactly 2 hole cards, got {len(hero)}"
+    """Validate simulation inputs for multiple players."""
+    if not (2 <= len(hands) <= 9):
+        msg = f"Must have between 2 and 9 players, got {len(hands)}"
         raise ValueError(msg)
 
-    if villain is not None and len(villain) != 2:
-        msg = f"Villain must have exactly 2 hole cards, got {len(villain)}"
-        raise ValueError(msg)
+    for i, hand in enumerate(hands):
+        if hand is not None and len(hand) != 2:
+            msg = f"Player {i+1} must have exactly 2 hole cards or be None, got {len(hand)}"
+            raise ValueError(msg)
 
     if len(board) > 5:
         msg = f"Board can have at most 5 cards, got {len(board)}"
         raise ValueError(msg)
 
-    # Check for duplicate cards
-    all_cards = list(hero) + list(board)
-    if villain is not None:
-        all_cards += list(villain)
-        
+    all_cards = list(board)
+    for hand in hands:
+        if hand is not None:
+            all_cards.extend(hand)
+            
     if len(set(all_cards)) != len(all_cards):
         seen: set[Card] = set()
         for card in all_cards:
@@ -149,6 +142,116 @@ def _validate_inputs(
 # =========================================================================
 
 
+def calculate_equities(
+    hands: Sequence[Sequence[Card] | None],
+    board: Sequence[Card] | None = None,
+    *,
+    num_sims: int = 10_000,
+    seed: int | None = None,
+) -> list[EquityResult]:
+    """Calculate equities for a multi-way pot via Monte Carlo simulation.
+
+    Parameters
+    ----------
+    hands:
+        List of hole cards for each player. Use ``None`` for random hands.
+    board:
+        Known community cards (0 to 5).
+    num_sims:
+        Number of Monte Carlo simulations to run.
+    seed:
+        Optional PRNG seed for reproducible results.
+
+    Returns
+    -------
+    list[EquityResult]
+        The simulation results for each player in the same order as `hands`.
+    """
+    if board is None:
+        board = []
+
+    _validate_multi_inputs(hands, board)
+
+    if num_sims <= 0:
+        msg = f"num_sims must be positive, got {num_sims}"
+        raise ValueError(msg)
+
+    known_cards = set(board)
+    for hand in hands:
+        if hand is not None:
+            known_cards.update(hand)
+            
+    stub = [
+        Card(rank, suit)
+        for rank in _ALL_RANKS
+        for suit in _ALL_SUITS
+        if Card(rank, suit) not in known_cards
+    ]
+
+    board_list = list(board)
+    board_needed = 5 - len(board_list)
+    random_hands_count = sum(1 for h in hands if h is None)
+    cards_to_deal = board_needed + 2 * random_hands_count
+    
+    num_players = len(hands)
+    
+    # Pre-build the fixed parts of each player's 7-card hand
+    fixed_hands_data = [
+        list(h) + board_list if h is not None else [] 
+        for h in hands
+    ]
+    
+    rng = random.Random(seed)
+    wins = [0] * num_players
+    ties = [0] * num_players
+    losses = [0] * num_players
+    equity_sums = [0.0] * num_players
+
+    for _ in range(num_sims):
+        dealt = rng.sample(stub, cards_to_deal)
+        community_dealt = dealt[:board_needed]
+        
+        scores = []
+        random_cards_index = board_needed
+        
+        for i, (hand, fixed) in enumerate(zip(hands, fixed_hands_data)):
+            if hand is not None:
+                hand_score = score_7(fixed + community_dealt)
+            else:
+                hole1 = dealt[random_cards_index]
+                hole2 = dealt[random_cards_index + 1]
+                random_cards_index += 2
+                hand_score = score_7(board_list + community_dealt + [hole1, hole2])
+            scores.append(hand_score)
+            
+        max_score = max(scores)
+        
+        # Determine winners
+        winners = []
+        for i in range(num_players):
+            if scores[i] == max_score:
+                winners.append(i)
+            else:
+                losses[i] += 1
+                
+        num_winners = len(winners)
+        pot_share = 1.0 / num_winners
+        
+        for i in winners:
+            if num_winners == 1:
+                wins[i] += 1
+            else:
+                ties[i] += 1
+            equity_sums[i] += pot_share
+
+    return [
+        _build_equity_result(
+            wins[i], ties[i], losses[i], num_sims, equity_sums[i] / num_sims
+        )
+        for i in range(num_players)
+    ]
+
+
 def calculate_equity(
     hero: Sequence[Card],
     villain: Sequence[Card] | None = None,
@@ -159,10 +262,8 @@ def calculate_equity(
 ) -> EquityResult:
     """Calculate hero's equity against villain via Monte Carlo simulation.
 
-    For each simulation, the remaining community cards are dealt randomly
-    from the stub deck (all cards minus hero, villain, and known board
-    cards).  Both players' hands are scored using the fast lookup-table
-    evaluator, and the result is tallied as a win, tie, or loss for hero.
+    This is a convenience wrapper around :func:`calculate_equities` for 
+    heads-up scenarios.
 
     Parameters
     ----------
@@ -199,76 +300,13 @@ def calculate_equity(
     >>> result.equity > 0.5  # AKs is a big favorite over 72o
     True
     """
-    if board is None:
-        board = []
-
-    _validate_inputs(hero, villain, board)
-
-    if num_sims <= 0:
-        msg = f"num_sims must be positive, got {num_sims}"
-        raise ValueError(msg)
-
-    # Build the stub deck: all 52 cards minus known cards
-    known_cards = set(hero) | set(board)
-    if villain is not None:
-        known_cards |= set(villain)
-        
-    stub = [
-        Card(rank, suit)
-        for rank in _ALL_RANKS
-        for suit in _ALL_SUITS
-        if Card(rank, suit) not in known_cards
-    ]
-
-    board_list = list(board)
-    board_needed = 5 - len(board_list)
-    hero_fixed = list(hero) + board_list
-    
-    rng = random.Random(seed)
-    wins = 0
-    ties = 0
-    losses = 0
-
-    if villain is not None:
-        # Fixed villain hand
-        villain_fixed = list(villain) + board_list
-        for _ in range(num_sims):
-            dealt = rng.sample(stub, board_needed)
-            hero_hand = hero_fixed + dealt
-            villain_hand = villain_fixed + dealt
-
-            hero_score = score_7(hero_hand)
-            villain_score = score_7(villain_hand)
-
-            if hero_score > villain_score:
-                wins += 1
-            elif hero_score == villain_score:
-                ties += 1
-            else:
-                losses += 1
-    else:
-        # Random villain hand (needs 2 extra cards)
-        cards_to_deal = board_needed + 2
-        for _ in range(num_sims):
-            dealt = rng.sample(stub, cards_to_deal)
-            
-            # First board_needed cards are the board, last 2 are villain hole cards
-            community_dealt = dealt[:board_needed]
-            
-            hero_hand = hero_fixed + community_dealt
-            villain_hand = board_list + dealt  # board_list + community_dealt + villain_hole
-
-            hero_score = score_7(hero_hand)
-            villain_score = score_7(villain_hand)
-
-            if hero_score > villain_score:
-                wins += 1
-            elif hero_score == villain_score:
-                ties += 1
-            else:
-                losses += 1
-
-    return _build_equity_result(wins, ties, losses, num_sims)
+    results = calculate_equities(
+        hands=[hero, villain],
+        board=board,
+        num_sims=num_sims,
+        seed=seed,
+    )
+    return results[0]
 
 
 # ---------------------------------------------------------------------------
