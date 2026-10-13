@@ -3,6 +3,11 @@
 This module provides the core simulation engine that calculates win / tie /
 loss probabilities by running thousands of random board runouts.
 
+The engine supports **convergence tracking with early stopping**: when the
+95% confidence interval for every player's equity shrinks below a
+configurable threshold, the simulation halts automatically, saving compute
+time without sacrificing accuracy.
+
 The primary entry point is :func:`calculate_equity`, which accepts hero
 and villain hole cards, an optional partial board, and a simulation count.
 
@@ -19,8 +24,9 @@ Example
 
 from __future__ import annotations
 
+import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Sequence
 
 from poker_equity.card import Card
@@ -56,6 +62,11 @@ class EquityResult:
         Tie percentage: ``ties / num_sims``.
     loss_pct : float
         Loss percentage: ``losses / num_sims``.
+    converged : bool
+        ``True`` if the simulation stopped early due to convergence.
+    convergence_ci : float
+        The 95% confidence interval half-width at the time the
+        simulation finished.  ``0.0`` when convergence was not tracked.
     """
 
     wins: int
@@ -66,26 +77,39 @@ class EquityResult:
     win_pct: float
     tie_pct: float
     loss_pct: float
+    converged: bool = False
+    convergence_ci: float = 0.0
 
     def __str__(self) -> str:
-        return (
-            f"Equity: {self.equity:.1%} | "
-            f"Win: {self.win_pct:.1%} | "
-            f"Tie: {self.tie_pct:.1%} | "
-            f"Lose: {self.loss_pct:.1%} | "
-            f"({self.num_sims:,} sims)"
-        )
+        parts = [
+            f"Equity: {self.equity:.1%}",
+            f"Win: {self.win_pct:.1%}",
+            f"Tie: {self.tie_pct:.1%}",
+            f"Lose: {self.loss_pct:.1%}",
+            f"({self.num_sims:,} sims)",
+        ]
+        if self.converged:
+            parts.append("[converged]")
+        return " | ".join(parts)
 
     def __repr__(self) -> str:
         return (
             f"EquityResult(equity={self.equity:.4f}, "
             f"win={self.win_pct:.4f}, tie={self.tie_pct:.4f}, "
-            f"loss={self.loss_pct:.4f}, sims={self.num_sims})"
+            f"loss={self.loss_pct:.4f}, sims={self.num_sims}, "
+            f"converged={self.converged})"
         )
 
 
 def _build_equity_result(
-    wins: int, ties: int, losses: int, num_sims: int, equity: float
+    wins: int,
+    ties: int,
+    losses: int,
+    num_sims: int,
+    equity: float,
+    *,
+    converged: bool = False,
+    convergence_ci: float = 0.0,
 ) -> EquityResult:
     """Construct an EquityResult from raw counts."""
     return EquityResult(
@@ -97,7 +121,31 @@ def _build_equity_result(
         win_pct=wins / num_sims,
         tie_pct=ties / num_sims,
         loss_pct=losses / num_sims,
+        converged=converged,
+        convergence_ci=convergence_ci,
     )
+
+
+# =========================================================================
+# Convergence tracking (Welford's online algorithm)
+# =========================================================================
+
+
+# 95% confidence z-score
+_Z_95 = 1.96
+
+# Minimum number of iterations before we start checking convergence,
+# to avoid false positives from tiny sample sizes.
+_MIN_CONVERGENCE_SIMS = 100
+
+
+def _confidence_interval_half_width(
+    variance: float, n: int
+) -> float:
+    """Return the 95% CI half-width given variance and sample count."""
+    if n < 2:
+        return float("inf")
+    return _Z_95 * math.sqrt(variance / n)
 
 
 # =========================================================================
@@ -148,6 +196,8 @@ def calculate_equities(
     *,
     num_sims: int = 10_000,
     seed: int | None = None,
+    convergence_threshold: float | None = None,
+    check_interval: int = 100,
 ) -> list[EquityResult]:
     """Calculate equities for a multi-way pot via Monte Carlo simulation.
 
@@ -158,9 +208,19 @@ def calculate_equities(
     board:
         Known community cards (0 to 5).
     num_sims:
-        Number of Monte Carlo simulations to run.
+        Maximum number of Monte Carlo simulations to run.
     seed:
         Optional PRNG seed for reproducible results.
+    convergence_threshold:
+        If set, the simulation may stop early when the 95%
+        confidence interval half-width for **every** player's equity
+        drops below this value.  For example, ``0.01`` means "stop
+        once we're within +/-1% of the true equity with 95% confidence".
+        ``None`` (the default) disables early stopping.
+    check_interval:
+        How often (in number of simulations) to check for convergence.
+        Smaller values detect convergence sooner but add overhead.
+        Default is 100.
 
     Returns
     -------
@@ -174,6 +234,14 @@ def calculate_equities(
 
     if num_sims <= 0:
         msg = f"num_sims must be positive, got {num_sims}"
+        raise ValueError(msg)
+
+    if convergence_threshold is not None and convergence_threshold <= 0:
+        msg = f"convergence_threshold must be positive, got {convergence_threshold}"
+        raise ValueError(msg)
+
+    if check_interval <= 0:
+        msg = f"check_interval must be positive, got {check_interval}"
         raise ValueError(msg)
 
     known_cards = set(board)
@@ -207,7 +275,15 @@ def calculate_equities(
     losses = [0] * num_players
     equity_sums = [0.0] * num_players
 
-    for _ in range(num_sims):
+    # Welford's online algorithm state for each player
+    tracking = convergence_threshold is not None
+    welford_mean = [0.0] * num_players
+    welford_m2 = [0.0] * num_players
+    converged = False
+    final_ci = 0.0
+    actual_sims = num_sims  # may be reduced by early stopping
+
+    for sim_idx in range(1, num_sims + 1):
         dealt = rng.sample(stub, cards_to_deal)
         community_dealt = dealt[:board_needed]
         
@@ -244,9 +320,58 @@ def calculate_equities(
                 ties[i] += 1
             equity_sums[i] += pot_share
 
+        # Update Welford's running statistics for each player
+        if tracking:
+            for p in range(num_players):
+                # This iteration's outcome: pot share earned
+                x = pot_share if p in winners else 0.0
+                delta = x - welford_mean[p]
+                welford_mean[p] += delta / sim_idx
+                delta2 = x - welford_mean[p]
+                welford_m2[p] += delta * delta2
+
+            # Periodically check convergence
+            if (
+                sim_idx >= _MIN_CONVERGENCE_SIMS
+                and sim_idx % check_interval == 0
+            ):
+                all_converged = True
+                max_ci = 0.0
+                for p in range(num_players):
+                    var = welford_m2[p] / (sim_idx - 1)
+                    ci = _confidence_interval_half_width(var, sim_idx)
+                    if ci > max_ci:
+                        max_ci = ci
+                    if ci > convergence_threshold:
+                        all_converged = False
+                        break
+
+                if all_converged:
+                    converged = True
+                    final_ci = max_ci
+                    actual_sims = sim_idx
+                    break
+
+    # Compute final CI if we tracked but didn't converge early
+    if tracking and not converged:
+        max_ci = 0.0
+        for p in range(num_players):
+            if actual_sims >= 2:
+                var = welford_m2[p] / (actual_sims - 1)
+                ci = _confidence_interval_half_width(var, actual_sims)
+                if ci > max_ci:
+                    max_ci = ci
+        final_ci = max_ci
+
     return [
         _build_equity_result(
-            wins[i], ties[i], losses[i], num_sims, equity_sums[i] / num_sims
+            wins[i],
+            ties[i],
+            losses[i],
+            actual_sims,
+            equity_sums[i] / actual_sims,
+            converged=converged,
+            convergence_ci=final_ci,
         )
         for i in range(num_players)
     ]
@@ -259,6 +384,8 @@ def calculate_equity(
     *,
     num_sims: int = 10_000,
     seed: int | None = None,
+    convergence_threshold: float | None = None,
+    check_interval: int = 100,
 ) -> EquityResult:
     """Calculate hero's equity against villain via Monte Carlo simulation.
 
@@ -276,10 +403,15 @@ def calculate_equity(
         Known community cards (0 to 5).  ``None`` or empty list means
         preflop (no board cards dealt yet).
     num_sims:
-        Number of Monte Carlo simulations to run.  Higher values give
-        more accurate results but take longer.  Default is 10,000.
+        Maximum number of Monte Carlo simulations to run.  Higher values
+        give more accurate results but take longer.  Default is 10,000.
     seed:
         Optional PRNG seed for reproducible results.
+    convergence_threshold:
+        If set, the simulation may stop early when the 95% CI
+        half-width drops below this value for every player.
+    check_interval:
+        How often (in simulations) to check convergence.
 
     Returns
     -------
@@ -305,6 +437,8 @@ def calculate_equity(
         board=board,
         num_sims=num_sims,
         seed=seed,
+        convergence_threshold=convergence_threshold,
+        check_interval=check_interval,
     )
     return results[0]
 

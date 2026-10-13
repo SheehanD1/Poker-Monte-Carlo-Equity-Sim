@@ -42,7 +42,7 @@ class TestEquityResult:
         """Test the developer representation."""
         result = _build_equity_result(wins=50, ties=10, losses=40, num_sims=100, equity=0.55)
         assert repr(result) == (
-            "EquityResult(equity=0.5500, win=0.5000, tie=0.1000, loss=0.4000, sims=100)"
+            "EquityResult(equity=0.5500, win=0.5000, tie=0.1000, loss=0.4000, sims=100, converged=False)"
         )
 
 
