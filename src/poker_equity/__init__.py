@@ -55,6 +55,21 @@ from poker_equity.constants import (
     validate_no_duplicates,
 )
 
+# -- Range & combos --------------------------------------------------------
+from poker_equity.range import (
+    TOTAL_HOLDEM_COMBOS,
+    Combo,
+    Range,
+    canonical_combo,
+    combo_from_str,
+    combo_to_str,
+    generate_all_combos,
+    generate_offsuit_combos,
+    generate_pair_combos,
+    generate_suited_combos,
+    generate_unpaired_combos,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -72,6 +87,18 @@ __all__ = [
     "score_5",
     "score_7",
     "score_hand",
+    # Range & combos
+    "Combo",
+    "Range",
+    "TOTAL_HOLDEM_COMBOS",
+    "canonical_combo",
+    "combo_from_str",
+    "combo_to_str",
+    "generate_all_combos",
+    "generate_offsuit_combos",
+    "generate_pair_combos",
+    "generate_suited_combos",
+    "generate_unpaired_combos",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
@@ -85,3 +112,4 @@ __all__ = [
     "cards_to_str",
     "validate_no_duplicates",
 ]
+
