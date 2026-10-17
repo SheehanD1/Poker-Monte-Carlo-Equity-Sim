@@ -8,6 +8,10 @@ The engine supports **convergence tracking with early stopping**: when the
 configurable threshold, the simulation halts automatically, saving compute
 time without sacrificing accuracy.
 
+An optional **progress callback** can be supplied to receive periodic
+updates during the simulation, useful for real-time UI progress bars
+or logging.
+
 The primary entry point is :func:`calculate_equity`, which accepts hero
 and villain hole cards, an optional partial board, and a simulation count.
 
@@ -26,8 +30,9 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 from poker_equity.card import Card
 from poker_equity.evaluator import score_7
@@ -126,6 +131,44 @@ def _build_equity_result(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ProgressInfo:
+    """Snapshot of simulation progress, delivered to ``on_progress`` callbacks.
+
+    Attributes
+    ----------
+    sims_completed : int
+        Number of simulations completed so far.
+    sims_total : int
+        Maximum number of simulations requested.
+    pct_complete : float
+        Completion fraction in ``[0.0, 1.0]``.
+    current_equities : list[float]
+        Running equity estimate for each player at this point.
+    elapsed_seconds : float
+        Wall-clock seconds elapsed since the simulation started.
+    """
+
+    sims_completed: int
+    sims_total: int
+    pct_complete: float
+    current_equities: list[float]
+    elapsed_seconds: float
+
+    def __repr__(self) -> str:
+        eqs = ", ".join(f"{e:.2%}" for e in self.current_equities)
+        return (
+            f"ProgressInfo({self.pct_complete:.1%} done, "
+            f"sims={self.sims_completed}/{self.sims_total}, "
+            f"equities=[{eqs}], "
+            f"elapsed={self.elapsed_seconds:.2f}s)"
+        )
+
+
+#: Type alias for progress callbacks.
+ProgressCallback = Callable[[ProgressInfo], None]
+
+
 # =========================================================================
 # Convergence tracking (Welford's online algorithm)
 # =========================================================================
@@ -198,6 +241,8 @@ def calculate_equities(
     seed: int | None = None,
     convergence_threshold: float | None = None,
     check_interval: int = 100,
+    on_progress: ProgressCallback | None = None,
+    progress_interval: int = 500,
 ) -> list[EquityResult]:
     """Calculate equities for a multi-way pot via Monte Carlo simulation.
 
@@ -221,6 +266,13 @@ def calculate_equities(
         How often (in number of simulations) to check for convergence.
         Smaller values detect convergence sooner but add overhead.
         Default is 100.
+    on_progress:
+        Optional callback invoked periodically with a :class:`ProgressInfo`
+        snapshot.  Useful for driving progress bars or real-time UI
+        updates.  ``None`` (the default) disables progress reporting.
+    progress_interval:
+        How often (in number of simulations) to invoke ``on_progress``.
+        Default is 500.  Ignored when ``on_progress`` is ``None``.
 
     Returns
     -------
@@ -242,6 +294,10 @@ def calculate_equities(
 
     if check_interval <= 0:
         msg = f"check_interval must be positive, got {check_interval}"
+        raise ValueError(msg)
+
+    if progress_interval <= 0:
+        msg = f"progress_interval must be positive, got {progress_interval}"
         raise ValueError(msg)
 
     known_cards = set(board)
@@ -282,6 +338,8 @@ def calculate_equities(
     converged = False
     final_ci = 0.0
     actual_sims = num_sims  # may be reduced by early stopping
+
+    t_start = time.perf_counter()
 
     for sim_idx in range(1, num_sims + 1):
         dealt = rng.sample(stub, cards_to_deal)
@@ -330,11 +388,24 @@ def calculate_equities(
                 delta2 = x - welford_mean[p]
                 welford_m2[p] += delta * delta2
 
-            # Periodically check convergence
+            # Periodically check convergence and fire progress callback
             if (
                 sim_idx >= _MIN_CONVERGENCE_SIMS
                 and sim_idx % check_interval == 0
             ):
+                # Fire progress callback at convergence check points
+                if on_progress is not None:
+                    current_eqs = [
+                        equity_sums[p] / sim_idx for p in range(num_players)
+                    ]
+                    on_progress(ProgressInfo(
+                        sims_completed=sim_idx,
+                        sims_total=num_sims,
+                        pct_complete=sim_idx / num_sims,
+                        current_equities=current_eqs,
+                        elapsed_seconds=time.perf_counter() - t_start,
+                    ))
+
                 all_converged = True
                 max_ci = 0.0
                 for p in range(num_players):
@@ -351,6 +422,23 @@ def calculate_equities(
                     final_ci = max_ci
                     actual_sims = sim_idx
                     break
+
+        # Fire periodic progress callback
+        if (
+            on_progress is not None
+            and not tracking  # avoid double-firing when convergence also checks
+            and sim_idx % progress_interval == 0
+        ):
+            current_eqs = [
+                equity_sums[p] / sim_idx for p in range(num_players)
+            ]
+            on_progress(ProgressInfo(
+                sims_completed=sim_idx,
+                sims_total=num_sims,
+                pct_complete=sim_idx / num_sims,
+                current_equities=current_eqs,
+                elapsed_seconds=time.perf_counter() - t_start,
+            ))
 
     # Compute final CI if we tracked but didn't converge early
     if tracking and not converged:
@@ -386,6 +474,8 @@ def calculate_equity(
     seed: int | None = None,
     convergence_threshold: float | None = None,
     check_interval: int = 100,
+    on_progress: ProgressCallback | None = None,
+    progress_interval: int = 500,
 ) -> EquityResult:
     """Calculate hero's equity against villain via Monte Carlo simulation.
 
@@ -412,6 +502,11 @@ def calculate_equity(
         half-width drops below this value for every player.
     check_interval:
         How often (in simulations) to check convergence.
+    on_progress:
+        Optional callback invoked periodically with a
+        :class:`ProgressInfo` snapshot.
+    progress_interval:
+        How often (in simulations) to invoke ``on_progress``.
 
     Returns
     -------
@@ -439,6 +534,8 @@ def calculate_equity(
         seed=seed,
         convergence_threshold=convergence_threshold,
         check_interval=check_interval,
+        on_progress=on_progress,
+        progress_interval=progress_interval,
     )
     return results[0]
 
