@@ -68,6 +68,7 @@ from poker_equity.range import (
     generate_pair_combos,
     generate_suited_combos,
     generate_unpaired_combos,
+    parse_range_string,
 )
 
 __all__ = [
@@ -99,6 +100,7 @@ __all__ = [
     "generate_pair_combos",
     "generate_suited_combos",
     "generate_unpaired_combos",
+    "parse_range_string",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",

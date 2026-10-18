@@ -14,7 +14,13 @@ import random
 from typing import Final, Iterable, Iterator, Sequence, TypeAlias
 
 from poker_equity.card import Card, Rank, Suit
-from poker_equity.constants import FULL_DECK_LIST, SUITS, parse_cards
+from poker_equity.constants import (
+    FULL_DECK_LIST,
+    RANK_CHARS,
+    SUIT_CHARS,
+    SUITS,
+    parse_cards,
+)
 
 # A single Hold'em hand combo is a 2-tuple of distinct Card objects
 Combo: TypeAlias = tuple[Card, Card]
@@ -304,6 +310,345 @@ TOTAL_HOLDEM_COMBOS: Final[int] = 1326
 
 
 # =========================================================================
+# Range String Parsing
+# =========================================================================
+
+
+def _is_card_string(token: str) -> bool:
+    """Check if a 2-character string represents a valid Card (e.g. 'Ah')."""
+    return (
+        len(token) == 2
+        and token[0].upper() in RANK_CHARS
+        and token[1].lower() in SUIT_CHARS
+    )
+
+
+def _coerce_pair_ranks(s: str) -> tuple[Rank, Rank]:
+    """Extract and sort two rank characters descending: (higher_rank, lower_rank)."""
+    if len(s) != 2:
+        msg = f"Expected exactly 2 rank characters, got: {s!r}"
+        raise ValueError(msg)
+    r1 = Rank.from_char(s[0])
+    r2 = Rank.from_char(s[1])
+    if r1 >= r2:
+        return (r1, r2)
+    return (r2, r1)
+
+
+def _tokenize_range_string(range_str: str) -> list[str]:
+    """Tokenize a range string into individual hand / combo tokens."""
+    # Fast path: check if the string parses as two individual cards (e.g. "Ah, Kd" or "Ah Kd")
+    try:
+        cards = parse_cards(range_str)
+        if len(cards) == 2:
+            return [f"{cards[0]}{cards[1]}"]
+    except ValueError:
+        pass
+
+    # Replace alternate delimiters with commas
+    text = range_str.replace(";", ",").replace("\n", ",")
+    comma_parts = [p.strip() for p in text.split(",") if p.strip()]
+    tokens: list[str] = []
+    for part in comma_parts:
+        sub = part.split()
+        if not sub:
+            continue
+        # If all sub-elements are 2-char card tokens and count is even (e.g. "Ah Kd Qs Qd"),
+        # group them into 4-char specific combo pairs ("AhKd", "QsQd").
+        if len(sub) >= 2 and all(_is_card_string(x) for x in sub) and len(sub) % 2 == 0:
+            for i in range(0, len(sub), 2):
+                tokens.append(f"{sub[i]}{sub[i + 1]}")
+        else:
+            tokens.extend(sub)
+    return tokens
+
+
+def _parse_dash_token(token: str) -> set[Combo]:
+    """Parse a dash-range token (e.g. '88-66', 'T9s-76s', 'A5s-A2s', 'AQo-ATo', 'AQ-AT')."""
+    parts = token.split("-")
+    if len(parts) != 2:
+        msg = f"Invalid range token: {token!r}"
+        raise ValueError(msg)
+    part1 = parts[0].strip()
+    part2 = parts[1].strip()
+
+    # 1. Pocket pairs: "88-66" or "66-88"
+    if (
+        len(part1) == 2
+        and len(part2) == 2
+        and part1[0].upper() == part1[1].upper()
+        and part2[0].upper() == part2[1].upper()
+    ):
+        r1 = Rank.from_char(part1[0])
+        r2 = Rank.from_char(part2[0])
+        low_val = min(r1.value, r2.value)
+        high_val = max(r1.value, r2.value)
+        combos: set[Combo] = set()
+        for r_val in range(low_val, high_val + 1):
+            combos.update(generate_pair_combos(Rank(r_val)))
+        return combos
+
+    # 2. Suited hands: "T9s-76s" or "A5s-A2s"
+    if (
+        len(part1) == 3
+        and len(part2) == 3
+        and part1[2].lower() == "s"
+        and part2[2].lower() == "s"
+    ):
+        r1_a, r2_a = _coerce_pair_ranks(part1[:2])
+        r1_b, r2_b = _coerce_pair_ranks(part2[:2])
+        if r1_a == r2_a or r1_b == r2_b:
+            msg = f"Suited hand cannot have identical ranks: {token!r}"
+            raise ValueError(msg)
+
+        combos = set()
+        # Case A: Same primary rank (kicker range, e.g. "A5s-A2s" or "A2s-A5s")
+        if r1_a == r1_b:
+            primary = r1_a
+            k_low = min(r2_a.value, r2_b.value)
+            k_high = max(r2_a.value, r2_b.value)
+            for k_val in range(k_low, k_high + 1):
+                combos.update(generate_suited_combos(primary, Rank(k_val)))
+            return combos
+
+        # Case B: Stepping connectors / gappers (e.g. "T9s-76s" or "76s-T9s")
+        gap_a = r1_a.value - r2_a.value
+        gap_b = r1_b.value - r2_b.value
+        if gap_a != gap_b:
+            msg = f"Range endpoints must have matching gap, got {part1} and {part2}"
+            raise ValueError(msg)
+        gap = gap_a
+        top_low = min(r1_a, r1_b)
+        top_high = max(r1_a, r1_b)
+        for top_val in range(top_low.value, top_high.value + 1):
+            bottom_val = top_val - gap
+            if bottom_val >= Rank.TWO.value:
+                combos.update(generate_suited_combos(Rank(top_val), Rank(bottom_val)))
+        return combos
+
+    # 3. Offsuit hands: "AQo-ATo" or "T9o-76o"
+    if (
+        len(part1) == 3
+        and len(part2) == 3
+        and part1[2].lower() == "o"
+        and part2[2].lower() == "o"
+    ):
+        r1_a, r2_a = _coerce_pair_ranks(part1[:2])
+        r1_b, r2_b = _coerce_pair_ranks(part2[:2])
+        if r1_a == r2_a or r1_b == r2_b:
+            msg = f"Offsuit hand cannot have identical ranks: {token!r}"
+            raise ValueError(msg)
+
+        combos = set()
+        if r1_a == r1_b:
+            primary = r1_a
+            k_low = min(r2_a.value, r2_b.value)
+            k_high = max(r2_a.value, r2_b.value)
+            for k_val in range(k_low, k_high + 1):
+                combos.update(generate_offsuit_combos(primary, Rank(k_val)))
+            return combos
+
+        gap_a = r1_a.value - r2_a.value
+        gap_b = r1_b.value - r2_b.value
+        if gap_a != gap_b:
+            msg = f"Range endpoints must have matching gap, got {part1} and {part2}"
+            raise ValueError(msg)
+        gap = gap_a
+        top_low = min(r1_a, r1_b)
+        top_high = max(r1_a, r1_b)
+        for top_val in range(top_low.value, top_high.value + 1):
+            bottom_val = top_val - gap
+            if bottom_val >= Rank.TWO.value:
+                combos.update(generate_offsuit_combos(Rank(top_val), Rank(bottom_val)))
+        return combos
+
+    # 4. Unpaired hands (both suited and offsuit): "AQ-AT" or "T9-76"
+    if (
+        len(part1) == 2
+        and len(part2) == 2
+        and part1[0].upper() != part1[1].upper()
+        and part2[0].upper() != part2[1].upper()
+    ):
+        r1_a, r2_a = _coerce_pair_ranks(part1)
+        r1_b, r2_b = _coerce_pair_ranks(part2)
+
+        combos = set()
+        if r1_a == r1_b:
+            primary = r1_a
+            k_low = min(r2_a.value, r2_b.value)
+            k_high = max(r2_a.value, r2_b.value)
+            for k_val in range(k_low, k_high + 1):
+                combos.update(generate_unpaired_combos(primary, Rank(k_val)))
+            return combos
+
+        gap_a = r1_a.value - r2_a.value
+        gap_b = r1_b.value - r2_b.value
+        if gap_a != gap_b:
+            msg = f"Range endpoints must have matching gap, got {part1} and {part2}"
+            raise ValueError(msg)
+        gap = gap_a
+        top_low = min(r1_a, r1_b)
+        top_high = max(r1_a, r1_b)
+        for top_val in range(top_low.value, top_high.value + 1):
+            bottom_val = top_val - gap
+            if bottom_val >= Rank.TWO.value:
+                combos.update(generate_unpaired_combos(Rank(top_val), Rank(bottom_val)))
+        return combos
+
+    msg = f"Incompatible range endpoints: {token!r}"
+    raise ValueError(msg)
+
+
+def _parse_plus_token(token: str) -> set[Combo]:
+    """Parse a plus token (e.g. 'QQ+', 'AKs+', 'A2s+', '76s+', 'AQo+', 'AQ+')."""
+    base = token[:-1].strip()
+
+    # 1. Pair plus: "QQ+", "88+", "AA+"
+    if len(base) == 2 and base[0].upper() == base[1].upper():
+        r = Rank.from_char(base[0])
+        combos: set[Combo] = set()
+        for r_val in range(r.value, Rank.ACE.value + 1):
+            combos.update(generate_pair_combos(Rank(r_val)))
+        return combos
+
+    # 2. Suited plus: "A2s+", "KTs+", "76s+", "AKs+"
+    if len(base) == 3 and base[2].lower() == "s":
+        r1, r2 = _coerce_pair_ranks(base[:2])
+        if r1 == r2:
+            msg = f"Suited hand cannot have identical ranks: {token!r}"
+            raise ValueError(msg)
+        gap = r1.value - r2.value
+        combos = set()
+        # Connectors below King: stepping connectors up to AKs
+        if gap == 1 and r1 < Rank.KING:
+            for top_val in range(r1.value, Rank.ACE.value + 1):
+                combos.update(generate_suited_combos(Rank(top_val), Rank(top_val - 1)))
+        else:
+            # Kicker moves up to r1 - 1
+            for k_val in range(r2.value, r1.value):
+                combos.update(generate_suited_combos(r1, Rank(k_val)))
+        return combos
+
+    # 3. Offsuit plus: "AQo+", "ATo+", "76o+", "AKo+"
+    if len(base) == 3 and base[2].lower() == "o":
+        r1, r2 = _coerce_pair_ranks(base[:2])
+        if r1 == r2:
+            msg = f"Offsuit hand cannot have identical ranks: {token!r}"
+            raise ValueError(msg)
+        gap = r1.value - r2.value
+        combos = set()
+        if gap == 1 and r1 < Rank.KING:
+            for top_val in range(r1.value, Rank.ACE.value + 1):
+                combos.update(generate_offsuit_combos(Rank(top_val), Rank(top_val - 1)))
+        else:
+            for k_val in range(r2.value, r1.value):
+                combos.update(generate_offsuit_combos(r1, Rank(k_val)))
+        return combos
+
+    # 4. Unpaired plus: "AQ+", "AT+", "76+", "AK+"
+    if len(base) == 2 and base[0].upper() != base[1].upper():
+        r1, r2 = _coerce_pair_ranks(base)
+        gap = r1.value - r2.value
+        combos = set()
+        if gap == 1 and r1 < Rank.KING:
+            for top_val in range(r1.value, Rank.ACE.value + 1):
+                combos.update(generate_unpaired_combos(Rank(top_val), Rank(top_val - 1)))
+        else:
+            for k_val in range(r2.value, r1.value):
+                combos.update(generate_unpaired_combos(r1, Rank(k_val)))
+        return combos
+
+    msg = f"Invalid plus token: {token!r}"
+    raise ValueError(msg)
+
+
+def _parse_token(token: str) -> set[Combo]:
+    """Parse a single range token into a set of canonical combos."""
+    cleaned = token.strip()
+    if not cleaned:
+        return set()
+
+    lower = cleaned.lower()
+    # Special keywords
+    if lower in ("100%", "random", "any", "*", "all", "xx"):
+        return generate_all_combos()
+    if lower in ("none", "empty", "0%"):
+        return set()
+
+    # Specific 4-char combo: "AhKd"
+    if (
+        len(cleaned) == 4
+        and _is_card_string(cleaned[:2])
+        and _is_card_string(cleaned[2:])
+    ):
+        c1 = Card.from_str(cleaned[:2])
+        c2 = Card.from_str(cleaned[2:])
+        return {canonical_combo(c1, c2)}
+
+    # Dash range: "88-66", "T9s-76s", "A5s-A2s"
+    if "-" in cleaned:
+        return _parse_dash_token(cleaned)
+
+    # Plus range: "QQ+", "AKs+", "A2s+"
+    if cleaned.endswith("+"):
+        return _parse_plus_token(cleaned)
+
+    # Single pocket pair: "AA", "KK"
+    if len(cleaned) == 2 and cleaned[0].upper() == cleaned[1].upper():
+        r = Rank.from_char(cleaned[0])
+        return generate_pair_combos(r)
+
+    # Single suited hand: "AKs", "QJs"
+    if len(cleaned) == 3 and cleaned[2].lower() == "s":
+        r1, r2 = _coerce_pair_ranks(cleaned[:2])
+        if r1 == r2:
+            msg = f"Suited hand cannot have identical ranks: {cleaned!r}"
+            raise ValueError(msg)
+        return generate_suited_combos(r1, r2)
+
+    # Single offsuit hand: "AKo", "QJo"
+    if len(cleaned) == 3 and cleaned[2].lower() == "o":
+        r1, r2 = _coerce_pair_ranks(cleaned[:2])
+        if r1 == r2:
+            msg = f"Offsuit hand cannot have identical ranks: {cleaned!r}"
+            raise ValueError(msg)
+        return generate_offsuit_combos(r1, r2)
+
+    # Single unpaired hand (suited + offsuit): "AK", "QJ"
+    if len(cleaned) == 2 and cleaned[0].upper() != cleaned[1].upper():
+        r1, r2 = _coerce_pair_ranks(cleaned)
+        return generate_unpaired_combos(r1, r2)
+
+    msg = f"Invalid range token: {cleaned!r}"
+    raise ValueError(msg)
+
+
+def parse_range_string(range_str: str) -> set[Combo]:
+    """Parse a standard poker range string into a set of canonical combos.
+
+    Parameters
+    ----------
+    range_str : str
+        Standard poker range syntax string, e.g. ``"AKs, QQ+, T9s-76s"``.
+
+    Returns
+    -------
+    set[Combo]
+        Set of canonical 2-card combos.
+
+    Raises
+    ------
+    ValueError
+        If any token in *range_str* has invalid poker range syntax.
+    """
+    tokens = _tokenize_range_string(range_str)
+    combos: set[Combo] = set()
+    for token in tokens:
+        combos.update(_parse_token(token))
+    return combos
+
+
+# =========================================================================
 # Range Class
 # =========================================================================
 
@@ -396,6 +741,39 @@ class Range:
         return len(self._combos) == 0
 
     # -- Factory Constructors ---------------------------------------------
+
+    @classmethod
+    def from_str(cls, range_str: str) -> Range:
+        """Parse a standard poker range string into a Range instance.
+
+        Supports pocket pairs (``"QQ+"``, ``"88-66"``), suited hands (``"AKs"``,
+        ``"T9s-76s"``, ``"A2s+"``), offsuit hands (``"AKo"``, ``"AQo+"``),
+        unpaired hands (``"AK"``, ``"AQ+"``), specific combos (``"AhKd"``),
+        and special keywords (``"random"``, ``"100%"``).
+
+        Parameters
+        ----------
+        range_str : str
+            A poker range string, e.g. ``"AKs, QQ+, T9s-76s"`` or ``"AA, KK, AK"``.
+
+        Returns
+        -------
+        Range
+            A new Range containing all parsed combos.
+
+        Raises
+        ------
+        ValueError
+            If *range_str* contains invalid tokens or syntax.
+
+        Examples
+        --------
+        >>> r = Range.from_str("QQ+, AKs, T9s-76s")
+        >>> len(r)
+        38
+        """
+        combos = parse_range_string(range_str)
+        return cls(combos)
 
     @classmethod
     def from_combos(
