@@ -19,6 +19,7 @@ from poker_equity.range import (
     generate_pair_combos,
     generate_suited_combos,
     generate_unpaired_combos,
+    parse_range_string,
 )
 
 
@@ -437,3 +438,447 @@ class TestRangeEqualityAndHashing:
         r = Range.pair("A")
         assert r != "AA"
         assert r != 42
+
+
+# =========================================================================
+# TestRangeParserPairs
+# =========================================================================
+
+
+class TestRangeParserPairs:
+    """Tests for range string parsing of pocket pairs."""
+
+    def test_single_pair_aa(self) -> None:
+        r = Range.from_str("AA")
+        assert len(r) == 6
+        assert r == Range.pair("A")
+
+    def test_single_pair_kk(self) -> None:
+        r = Range.from_str("KK")
+        assert len(r) == 6
+        assert r == Range.pair("K")
+
+    def test_single_pair_22(self) -> None:
+        r = Range.from_str("22")
+        assert len(r) == 6
+        assert r == Range.pair("2")
+
+    def test_plus_notation_qq_plus(self) -> None:
+        # QQ+ means QQ, KK, AA -> 3 pairs * 6 combos = 18 combos
+        r = Range.from_str("QQ+")
+        assert len(r) == 18
+        expected = Range.pair("Q") | Range.pair("K") | Range.pair("A")
+        assert r == expected
+
+    def test_plus_notation_88_plus(self) -> None:
+        # 88+ means 88, 99, TT, JJ, QQ, KK, AA -> 7 pairs * 6 = 42 combos
+        r = Range.from_str("88+")
+        assert len(r) == 42
+
+    def test_plus_notation_22_plus(self) -> None:
+        # 22+ means all 13 pocket pairs -> 78 combos
+        r = Range.from_str("22+")
+        assert len(r) == 78
+
+    def test_plus_notation_aa_plus(self) -> None:
+        # AA+ is just AA -> 6 combos
+        r = Range.from_str("AA+")
+        assert len(r) == 6
+        assert r == Range.pair("A")
+
+    def test_dash_notation_pairs(self) -> None:
+        # 88-66 means 88, 77, 66 -> 3 * 6 = 18 combos
+        r = Range.from_str("88-66")
+        assert len(r) == 18
+        expected = Range.pair("8") | Range.pair("7") | Range.pair("6")
+        assert r == expected
+
+    def test_dash_notation_pairs_reversed(self) -> None:
+        # 66-88 is identical to 88-66
+        r = Range.from_str("66-88")
+        assert len(r) == 18
+        assert r == Range.from_str("88-66")
+
+    def test_dash_notation_same_pair(self) -> None:
+        r = Range.from_str("TT-TT")
+        assert len(r) == 6
+        assert r == Range.pair("T")
+
+    def test_pair_case_insensitivity(self) -> None:
+        r1 = Range.from_str("qq+")
+        r2 = Range.from_str("QQ+")
+        assert r1 == r2
+
+
+# =========================================================================
+# TestRangeParserSuited
+# =========================================================================
+
+
+class TestRangeParserSuited:
+    """Tests for range string parsing of suited hands."""
+
+    def test_single_suited_aks(self) -> None:
+        r = Range.from_str("AKs")
+        assert len(r) == 4
+        assert r == Range.suited("A", "K")
+
+    def test_single_suited_qjs(self) -> None:
+        r = Range.from_str("QJs")
+        assert len(r) == 4
+        assert r == Range.suited("Q", "J")
+
+    def test_single_suited_reversed_ranks(self) -> None:
+        # KAs normalizes to AKs
+        r = Range.from_str("KAs")
+        assert len(r) == 4
+        assert r == Range.from_str("AKs")
+
+    def test_suited_kicker_plus(self) -> None:
+        # A2s+ means A2s through AKs (12 suited hands * 4 = 48 combos)
+        r = Range.from_str("A2s+")
+        assert len(r) == 48
+
+        # KTs+ means KTs, KJs, KQs (3 hands * 4 = 12 combos)
+        r_kt = Range.from_str("KTs+")
+        assert len(r_kt) == 12
+
+        # AQs+ means AQs, AKs (2 hands * 4 = 8 combos)
+        r_aq = Range.from_str("AQs+")
+        assert len(r_aq) == 8
+
+    def test_suited_connector_plus(self) -> None:
+        # 76s+ means suited connectors 76s, 87s, 98s, T9s, JTs, QJs, KQs, AKs (8 hands * 4 = 32 combos)
+        r = Range.from_str("76s+")
+        assert len(r) == 32
+
+        # T9s+ means T9s, JTs, QJs, KQs, AKs (5 hands * 4 = 20 combos)
+        r_t9 = Range.from_str("T9s+")
+        assert len(r_t9) == 20
+
+    def test_suited_dash_connector_range(self) -> None:
+        # T9s-76s means T9s, 98s, 87s, 76s -> 4 * 4 = 16 combos
+        r = Range.from_str("T9s-76s")
+        assert len(r) == 16
+        expected = (
+            Range.suited("T", "9")
+            | Range.suited("9", "8")
+            | Range.suited("8", "7")
+            | Range.suited("7", "6")
+        )
+        assert r == expected
+
+    def test_suited_dash_connector_range_reversed(self) -> None:
+        r = Range.from_str("76s-T9s")
+        assert len(r) == 16
+        assert r == Range.from_str("T9s-76s")
+
+    def test_suited_dash_kicker_range(self) -> None:
+        # A5s-A2s means A5s, A4s, A3s, A2s -> 4 * 4 = 16 combos
+        r = Range.from_str("A5s-A2s")
+        assert len(r) == 16
+
+        # KQs-KTs means KQs, KJs, KTs -> 3 * 4 = 12 combos
+        r_kq = Range.from_str("KQs-KTs")
+        assert len(r_kq) == 12
+
+    def test_suited_case_insensitivity(self) -> None:
+        assert Range.from_str("aks") == Range.from_str("AKs")
+        assert Range.from_str("t9s-76s") == Range.from_str("T9s-76s")
+
+
+# =========================================================================
+# TestRangeParserOffsuit
+# =========================================================================
+
+
+class TestRangeParserOffsuit:
+    """Tests for range string parsing of offsuit hands."""
+
+    def test_single_offsuit_ako(self) -> None:
+        r = Range.from_str("AKo")
+        assert len(r) == 12
+        assert r == Range.offsuit("A", "K")
+
+    def test_single_offsuit_qjo(self) -> None:
+        r = Range.from_str("QJo")
+        assert len(r) == 12
+        assert r == Range.offsuit("Q", "J")
+
+    def test_single_offsuit_reversed_ranks(self) -> None:
+        assert Range.from_str("KAo") == Range.from_str("AKo")
+
+    def test_offsuit_kicker_plus(self) -> None:
+        # AQo+ means AQo, AKo -> 2 * 12 = 24 combos
+        r = Range.from_str("AQo+")
+        assert len(r) == 24
+        assert r == (Range.offsuit("A", "Q") | Range.offsuit("A", "K"))
+
+        # ATo+ means ATo, AJo, AQo, AKo -> 4 * 12 = 48 combos
+        r_at = Range.from_str("ATo+")
+        assert len(r_at) == 48
+
+    def test_offsuit_connector_plus(self) -> None:
+        # 76o+ means 76o..AKo (8 hands * 12 = 96 combos)
+        r = Range.from_str("76o+")
+        assert len(r) == 96
+
+    def test_offsuit_dash_kicker_range(self) -> None:
+        # AQo-ATo means AQo, AJo, ATo -> 3 * 12 = 36 combos
+        r = Range.from_str("AQo-ATo")
+        assert len(r) == 36
+
+    def test_offsuit_dash_connector_range(self) -> None:
+        # T9o-76o means T9o, 98o, 87o, 76o -> 4 * 12 = 48 combos
+        r = Range.from_str("T9o-76o")
+        assert len(r) == 48
+
+
+# =========================================================================
+# TestRangeParserUnpaired
+# =========================================================================
+
+
+class TestRangeParserUnpaired:
+    """Tests for range string parsing of hands without suited/offsuit specifier."""
+
+    def test_single_unpaired_ak(self) -> None:
+        # AK means both AKs (4) and AKo (12) -> 16 combos
+        r = Range.from_str("AK")
+        assert len(r) == 16
+        assert r == Range.unpaired("A", "K")
+
+    def test_single_unpaired_qj(self) -> None:
+        r = Range.from_str("QJ")
+        assert len(r) == 16
+        assert r == Range.unpaired("Q", "J")
+
+    def test_single_unpaired_reversed_ranks(self) -> None:
+        assert Range.from_str("KA") == Range.from_str("AK")
+
+    def test_unpaired_kicker_plus(self) -> None:
+        # AQ+ means AQ (16) + AK (16) = 32 combos
+        r = Range.from_str("AQ+")
+        assert len(r) == 32
+        assert r == (Range.unpaired("A", "Q") | Range.unpaired("A", "K"))
+
+        # AT+ means AT, AJ, AQ, AK -> 4 * 16 = 64 combos
+        r_at = Range.from_str("AT+")
+        assert len(r_at) == 64
+
+    def test_unpaired_connector_plus(self) -> None:
+        # 76+ means 8 connector hands * 16 = 128 combos
+        r = Range.from_str("76+")
+        assert len(r) == 128
+
+    def test_unpaired_dash_kicker_range(self) -> None:
+        # AQ-AT means AQ, AJ, AT -> 3 * 16 = 48 combos
+        r = Range.from_str("AQ-AT")
+        assert len(r) == 48
+
+    def test_unpaired_dash_connector_range(self) -> None:
+        # T9-76 means T9, 98, 87, 76 -> 4 * 16 = 64 combos
+        r = Range.from_str("T9-76")
+        assert len(r) == 64
+
+
+# =========================================================================
+# TestRangeParserSpecificCombos
+# =========================================================================
+
+
+class TestRangeParserSpecificCombos:
+    """Tests for parsing specific card combos."""
+
+    def test_specific_combo_4_chars(self) -> None:
+        r = Range.from_str("AhKd")
+        assert len(r) == 1
+        assert (Card.from_str("Ah"), Card.from_str("Kd")) in r
+
+    def test_specific_combo_reversed_order(self) -> None:
+        r = Range.from_str("KdAh")
+        assert len(r) == 1
+        assert (Card.from_str("Ah"), Card.from_str("Kd")) in r
+
+    def test_specific_combos_multiple(self) -> None:
+        r = Range.from_str("AhKd, AsKs, 2c2d")
+        assert len(r) == 3
+
+    def test_specific_combo_space_separated(self) -> None:
+        r = Range.from_str("Ah Kd")
+        assert len(r) == 1
+        assert (Card.from_str("Ah"), Card.from_str("Kd")) in r
+
+    def test_specific_combo_comma_separated_cards(self) -> None:
+        r = Range.from_str("Ah,Kd")
+        assert len(r) == 1
+        assert (Card.from_str("Ah"), Card.from_str("Kd")) in r
+
+    def test_specific_combos_space_separated_pairs(self) -> None:
+        r = Range.from_str("Ah Kd, Qs Qd")
+        assert len(r) == 2
+
+
+# =========================================================================
+# TestRangeParserSpecialKeywords
+# =========================================================================
+
+
+class TestRangeParserSpecialKeywords:
+    """Tests for special keywords (random, 100%, any, none, empty)."""
+
+    def test_random_keyword(self) -> None:
+        r = Range.from_str("random")
+        assert len(r) == TOTAL_HOLDEM_COMBOS
+
+    def test_100_percent_keyword(self) -> None:
+        r = Range.from_str("100%")
+        assert len(r) == TOTAL_HOLDEM_COMBOS
+
+    def test_any_keyword(self) -> None:
+        r = Range.from_str("any")
+        assert len(r) == TOTAL_HOLDEM_COMBOS
+
+    def test_star_keyword(self) -> None:
+        r = Range.from_str("*")
+        assert len(r) == TOTAL_HOLDEM_COMBOS
+
+    def test_none_keyword(self) -> None:
+        r = Range.from_str("none")
+        assert len(r) == 0
+        assert r.is_empty
+
+    def test_empty_keyword(self) -> None:
+        r = Range.from_str("empty")
+        assert len(r) == 0
+        assert r.is_empty
+
+    def test_empty_string(self) -> None:
+        r = Range.from_str("")
+        assert len(r) == 0
+        assert r.is_empty
+
+        r_blank = Range.from_str("   ")
+        assert len(r_blank) == 0
+
+
+# =========================================================================
+# TestRangeParserCombinedRanges
+# =========================================================================
+
+
+class TestRangeParserCombinedRanges:
+    """Tests for composite ranges combining multiple tokens."""
+
+    def test_commit_example_aks_qq_plus_t9s_76s(self) -> None:
+        # AKs (4) + QQ+ (18) + T9s-76s (16) = 38 combos
+        r = Range.from_str("AKs, QQ+, T9s-76s")
+        assert len(r) == 38
+
+    def test_broad_range(self) -> None:
+        # AA, KK, QQ, JJ, TT (5*6 = 30) + AKs (4) + AKo (12) = 46 combos
+        r = Range.from_str("AA, KK, QQ, JJ, TT, AKs, AKo")
+        assert len(r) == 46
+
+    def test_semicolon_delimiter(self) -> None:
+        r = Range.from_str("AA; KK; AKs")
+        assert len(r) == 16
+
+    def test_space_delimiter(self) -> None:
+        r = Range.from_str("AA KK AKs")
+        assert len(r) == 16
+
+    def test_mixed_delimiters(self) -> None:
+        r = Range.from_str("AA, KK; QQ AKs")
+        assert len(r) == 22
+
+    def test_overlapping_tokens_deduplicated(self) -> None:
+        # QQ+ includes QQ, KK, AA; adding KK and AA should not create duplicate combos
+        r = Range.from_str("QQ+, KK, AA")
+        assert len(r) == 18
+
+    def test_redundant_tokens(self) -> None:
+        # AK includes AKs and AKo
+        r = Range.from_str("AK, AKs, AKo")
+        assert len(r) == 16
+
+    def test_extra_commas_and_whitespace(self) -> None:
+        r = Range.from_str("  QQ+ , , AKs  , ")
+        assert len(r) == 22
+
+
+# =========================================================================
+# TestRangeParserInvalidSyntax
+# =========================================================================
+
+
+class TestRangeParserInvalidSyntax:
+    """Tests for invalid range string error handling."""
+
+    def test_invalid_token_string(self) -> None:
+        with pytest.raises(ValueError, match="Invalid range token"):
+            Range.from_str("XYZ")
+
+    def test_single_char_token(self) -> None:
+        with pytest.raises(ValueError, match="Invalid range token"):
+            Range.from_str("A")
+
+    def test_three_char_bad_suffix(self) -> None:
+        with pytest.raises(ValueError, match="Invalid range token"):
+            Range.from_str("AKx")
+
+    def test_pair_with_suited_suffix(self) -> None:
+        with pytest.raises(ValueError, match="Suited hand cannot have identical ranks"):
+            Range.from_str("AAs")
+
+    def test_pair_with_offsuit_suffix(self) -> None:
+        with pytest.raises(ValueError, match="Offsuit hand cannot have identical ranks"):
+            Range.from_str("AAo")
+
+    def test_dash_mismatched_gaps(self) -> None:
+        with pytest.raises(ValueError, match="matching gap"):
+            Range.from_str("T9s-75s")
+
+    def test_dash_pair_and_unpaired(self) -> None:
+        with pytest.raises(ValueError, match="Incompatible range endpoints"):
+            Range.from_str("99-AK")
+
+    def test_dash_suited_and_offsuit(self) -> None:
+        with pytest.raises(ValueError, match="Incompatible range endpoints"):
+            Range.from_str("AKs-AQo")
+
+    def test_plus_on_single_char(self) -> None:
+        with pytest.raises(ValueError, match="Invalid plus token"):
+            Range.from_str("A+")
+
+    def test_invalid_card_in_combo(self) -> None:
+        with pytest.raises(ValueError):
+            Range.from_str("ZxAh")
+
+    def test_duplicate_card_in_combo(self) -> None:
+        with pytest.raises(ValueError, match="identical cards"):
+            Range.from_str("AhAh")
+
+    def test_trailing_dash(self) -> None:
+        with pytest.raises(ValueError, match="Invalid range token"):
+            Range.from_str("AA-")
+
+
+# =========================================================================
+# TestParseRangeStringDirect
+# =========================================================================
+
+
+class TestParseRangeStringDirect:
+    """Tests for calling parse_range_string function directly."""
+
+    def test_direct_function_call(self) -> None:
+        combos = parse_range_string("QQ+")
+        assert isinstance(combos, set)
+        assert len(combos) == 18
+
+    def test_direct_matches_from_str(self) -> None:
+        combos = parse_range_string("AKs, QQ+, T9s-76s")
+        r = Range.from_str("AKs, QQ+, T9s-76s")
+        assert combos == r.combos
+

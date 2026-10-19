@@ -371,6 +371,9 @@ def _parse_dash_token(token: str) -> set[Combo]:
         raise ValueError(msg)
     part1 = parts[0].strip()
     part2 = parts[1].strip()
+    if not part1 or not part2:
+        msg = f"Invalid range token: {token!r}"
+        raise ValueError(msg)
 
     # 1. Pocket pairs: "88-66" or "66-88"
     if (
