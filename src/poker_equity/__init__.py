@@ -57,11 +57,15 @@ from poker_equity.constants import (
 
 # -- Range & combos --------------------------------------------------------
 from poker_equity.range import (
+    GRID_RANKS,
+    HAND_GRID_CELLS,
+    NUM_GRID_CELLS,
     TOTAL_HOLDEM_COMBOS,
     Combo,
     Range,
     canonical_combo,
     combo_from_str,
+    combo_to_cell,
     combo_to_str,
     generate_all_combos,
     generate_offsuit_combos,
@@ -91,9 +95,13 @@ __all__ = [
     # Range & combos
     "Combo",
     "Range",
+    "GRID_RANKS",
+    "HAND_GRID_CELLS",
+    "NUM_GRID_CELLS",
     "TOTAL_HOLDEM_COMBOS",
     "canonical_combo",
     "combo_from_str",
+    "combo_to_cell",
     "combo_to_str",
     "generate_all_combos",
     "generate_offsuit_combos",

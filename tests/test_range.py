@@ -9,10 +9,15 @@ import pytest
 from poker_equity.card import Card, Rank, Suit
 from poker_equity.constants import FULL_DECK
 from poker_equity.range import (
+    CELL_COMBOS,
+    GRID_RANKS,
+    HAND_GRID_CELLS,
+    NUM_GRID_CELLS,
     TOTAL_HOLDEM_COMBOS,
     Range,
     canonical_combo,
     combo_from_str,
+    combo_to_cell,
     combo_to_str,
     generate_all_combos,
     generate_offsuit_combos,
@@ -881,4 +886,278 @@ class TestParseRangeStringDirect:
         combos = parse_range_string("AKs, QQ+, T9s-76s")
         r = Range.from_str("AKs, QQ+, T9s-76s")
         assert combos == r.combos
+
+
+# =========================================================================
+# TestHandGridStructure
+# =========================================================================
+
+
+class TestHandGridStructure:
+    """Tests verifying the 13x13 poker matrix constants and layout."""
+
+    def test_grid_ranks_count_and_order(self) -> None:
+        assert len(GRID_RANKS) == 13
+        assert GRID_RANKS == (
+            "A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"
+        )
+
+    def test_num_grid_cells_is_169(self) -> None:
+        assert NUM_GRID_CELLS == 169
+        assert len(HAND_GRID_CELLS) == 169
+        # All cell names must be unique
+        assert len(set(HAND_GRID_CELLS)) == 169
+
+    def test_diagonal_contains_13_pairs(self) -> None:
+        # Indices 0, 14, 28, ..., 168 (i*14) are diagonal elements
+        for i, rank in enumerate(GRID_RANKS):
+            idx = i * 13 + i
+            cell = HAND_GRID_CELLS[idx]
+            assert cell == f"{rank}{rank}"
+
+    def test_upper_triangle_is_suited(self) -> None:
+        for i in range(13):
+            for j in range(i + 1, 13):
+                idx = i * 13 + j
+                cell = HAND_GRID_CELLS[idx]
+                assert cell.endswith("s")
+                assert len(cell) == 3
+                assert cell[0] == GRID_RANKS[i]
+                assert cell[1] == GRID_RANKS[j]
+
+    def test_lower_triangle_is_offsuit(self) -> None:
+        for i in range(13):
+            for j in range(0, i):
+                idx = i * 13 + j
+                cell = HAND_GRID_CELLS[idx]
+                assert cell.endswith("o")
+                assert len(cell) == 3
+                assert cell[0] == GRID_RANKS[j]
+                assert cell[1] == GRID_RANKS[i]
+
+    def test_cell_combos_mapping_totals(self) -> None:
+        assert len(CELL_COMBOS) == 169
+        total_combos = 0
+        pair_cells = 0
+        suited_cells = 0
+        offsuit_cells = 0
+
+        for cell, combos in CELL_COMBOS.items():
+            total_combos += len(combos)
+            if len(cell) == 2:
+                pair_cells += 1
+                assert len(combos) == 6
+            elif cell.endswith("s"):
+                suited_cells += 1
+                assert len(combos) == 4
+            elif cell.endswith("o"):
+                offsuit_cells += 1
+                assert len(combos) == 12
+
+        assert pair_cells == 13
+        assert suited_cells == 78
+        assert offsuit_cells == 78
+        assert total_combos == TOTAL_HOLDEM_COMBOS
+        assert total_combos == 1326
+
+    def test_all_grid_combos_are_unique(self) -> None:
+        all_combos: set[Combo] = set()
+        for combos in CELL_COMBOS.values():
+            all_combos.update(combos)
+        assert len(all_combos) == 1326
+
+
+# =========================================================================
+# TestComboToCell
+# =========================================================================
+
+
+class TestComboToCell:
+    """Tests for combo_to_cell mapping function."""
+
+    def test_pair_combo_to_cell(self) -> None:
+        c1 = Card.from_str("As")
+        c2 = Card.from_str("Ah")
+        combo = canonical_combo(c1, c2)
+        assert combo_to_cell(combo) == "AA"
+
+    def test_suited_combo_to_cell(self) -> None:
+        c1 = Card.from_str("Ah")
+        c2 = Card.from_str("Kh")
+        combo = canonical_combo(c1, c2)
+        assert combo_to_cell(combo) == "AKs"
+
+    def test_offsuit_combo_to_cell(self) -> None:
+        c1 = Card.from_str("Ah")
+        c2 = Card.from_str("Kd")
+        combo = canonical_combo(c1, c2)
+        assert combo_to_cell(combo) == "AKo"
+
+    def test_low_unpaired_combos(self) -> None:
+        c1 = Card.from_str("7c")
+        c2 = Card.from_str("2d")
+        combo = canonical_combo(c1, c2)
+        assert combo_to_cell(combo) == "72o"
+
+        c3 = Card.from_str("3h")
+        c4 = Card.from_str("2h")
+        combo_suited = canonical_combo(c3, c4)
+        assert combo_to_cell(combo_suited) == "32s"
+
+
+# =========================================================================
+# TestRangeToMatrix
+# =========================================================================
+
+
+class TestRangeToMatrix:
+    """Tests for Range.to_matrix method."""
+
+    def test_all_range_to_matrix(self) -> None:
+        r = Range.all()
+        m = r.to_matrix()
+        assert len(m) == 169
+        assert all(w == 1.0 for w in m.values())
+
+    def test_empty_range_to_matrix(self) -> None:
+        r = Range.empty()
+        m = r.to_matrix(include_zeros=True)
+        assert len(m) == 169
+        assert all(w == 0.0 for w in m.values())
+
+        m_sparse = r.to_matrix(include_zeros=False)
+        assert m_sparse == {}
+
+    def test_single_pair_range_to_matrix(self) -> None:
+        r = Range.from_str("AA")
+        m = r.to_matrix(include_zeros=True)
+        assert len(m) == 169
+        assert m["AA"] == 1.0
+        assert m["KK"] == 0.0
+        assert m["AKs"] == 0.0
+
+        m_sparse = r.to_matrix(include_zeros=False)
+        assert m_sparse == {"AA": 1.0}
+
+    def test_composite_range_to_matrix(self) -> None:
+        r = Range.from_str("QQ+, AKs")
+        m_sparse = r.to_matrix(include_zeros=False)
+        assert set(m_sparse.keys()) == {"QQ", "KK", "AA", "AKs"}
+        assert all(w == 1.0 for w in m_sparse.values())
+
+    def test_partial_cell_weight(self) -> None:
+        # 1 combo of AKs out of 4 -> weight 0.25
+        c1 = Card.from_str("Ah")
+        c2 = Card.from_str("Kh")
+        r = Range([(c1, c2)])
+        m = r.to_matrix(include_zeros=False)
+        assert len(m) == 1
+        assert m["AKs"] == 0.25
+
+        # 3 combos of AA out of 6 -> weight 0.5
+        aa_combos = list(CELL_COMBOS["AA"])[:3]
+        r_aa = Range(aa_combos)
+        m_aa = r_aa.to_matrix(include_zeros=False)
+        assert m_aa["AA"] == 0.5
+
+
+# =========================================================================
+# TestRangeToGrid2D
+# =========================================================================
+
+
+class TestRangeToGrid2D:
+    """Tests for Range.to_grid_2d method."""
+
+    def test_grid_dimensions(self) -> None:
+        r = Range.from_str("AA, KK, AKs")
+        grid = r.to_grid_2d()
+        assert len(grid) == 13
+        assert all(len(row) == 13 for row in grid)
+
+    def test_all_range_grid_all_ones(self) -> None:
+        grid = Range.all().to_grid_2d()
+        assert all(all(val == 1.0 for val in row) for row in grid)
+
+    def test_empty_range_grid_all_zeros(self) -> None:
+        grid = Range.empty().to_grid_2d()
+        assert all(all(val == 0.0 for val in row) for row in grid)
+
+    def test_specific_cell_positions(self) -> None:
+        r = Range.from_str("AA, AKs, AKo, 22")
+        grid = r.to_grid_2d()
+        assert grid[0][0] == 1.0   # AA (row 0, col 0)
+        assert grid[0][1] == 1.0   # AKs (row 0, col 1)
+        assert grid[1][0] == 1.0   # AKo (row 1, col 0)
+        assert grid[12][12] == 1.0 # 22 (row 12, col 12)
+        assert grid[0][2] == 0.0   # AQs (row 0, col 2)
+
+
+# =========================================================================
+# TestRangeFromMatrix
+# =========================================================================
+
+
+class TestRangeFromMatrix:
+    """Tests for Range.from_matrix constructor."""
+
+    def test_reconstruct_full_range(self) -> None:
+        all_matrix = {cell: 1.0 for cell in HAND_GRID_CELLS}
+        r = Range.from_matrix(all_matrix)
+        assert len(r) == 1326
+        assert r == Range.all()
+
+    def test_reconstruct_empty_range(self) -> None:
+        r1 = Range.from_matrix({})
+        assert r1.is_empty
+        assert len(r1) == 0
+
+        zero_matrix = {cell: 0.0 for cell in HAND_GRID_CELLS}
+        r2 = Range.from_matrix(zero_matrix)
+        assert r2.is_empty
+        assert len(r2) == 0
+
+    def test_roundtrip_composite_range(self) -> None:
+        original = Range.from_str("QQ+, AKs, T9s-76s")
+        matrix = original.to_matrix()
+        reconstructed = Range.from_matrix(matrix)
+        assert reconstructed == original
+        assert len(reconstructed) == len(original)
+
+    def test_partial_weights_proportional_combos(self) -> None:
+        # AA has 6 combos. Weight 0.5 -> 3 combos
+        r_aa = Range.from_matrix({"AA": 0.5})
+        assert len(r_aa) == 3
+
+        # AKs has 4 combos. Weight 0.5 -> 2 combos
+        r_aks = Range.from_matrix({"AKs": 0.5})
+        assert len(r_aks) == 2
+
+        # AKo has 12 combos. Weight 0.5 -> 6 combos
+        r_ako = Range.from_matrix({"AKo": 0.5})
+        assert len(r_ako) == 6
+
+    def test_from_matrix_with_threshold(self) -> None:
+        # With threshold=0.5:
+        # AA at 0.5 >= 0.5 -> includes all 6 combos
+        # KK at 0.4 < 0.5 -> includes 0 combos
+        r = Range.from_matrix({"AA": 0.5, "KK": 0.4}, threshold=0.5)
+        assert len(r) == 6
+        assert r == Range.pair("A")
+
+    def test_unsuited_shorthand_key(self) -> None:
+        # "AK" key adds both AKs (4) and AKo (12) -> 16 combos
+        r = Range.from_matrix({"AK": 1.0})
+        assert len(r) == 16
+        assert r == Range.unpaired("A", "K")
+
+    def test_case_insensitive_cell_keys(self) -> None:
+        r = Range.from_matrix({"aks": 1.0, "  aa  ": 1.0})
+        assert len(r) == 10
+        assert r == (Range.suited("A", "K") | Range.pair("A"))
+
+    def test_invalid_cell_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Invalid hand matrix cell"):
+            Range.from_matrix({"XYZ": 1.0})
+
 

@@ -9,9 +9,10 @@ It also includes generator functions for poker hand subsets such as pocket pairs
 
 from __future__ import annotations
 
+import collections
 import itertools
 import random
-from typing import Final, Iterable, Iterator, Sequence, TypeAlias
+from typing import Final, Iterable, Iterator, Mapping, Sequence, TypeAlias
 
 from poker_equity.card import Card, Rank, Suit
 from poker_equity.constants import (
@@ -652,6 +653,107 @@ def parse_range_string(range_str: str) -> set[Combo]:
 
 
 # =========================================================================
+# 13x13 Hand Grid Matrix Structure
+# =========================================================================
+
+GRID_RANKS: Final[tuple[str, ...]] = (
+    "A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"
+)
+"""The 13 rank characters in standard poker matrix order (Ace to Deuce)."""
+
+NUM_GRID_CELLS: Final[int] = 169
+"""The total number of cells in the 13x13 poker hand matrix (13 pairs + 78 suited + 78 offsuit)."""
+
+
+def _build_hand_grid_cells() -> tuple[str, ...]:
+    """Build the canonical 169-cell list in row-major order."""
+    cells: list[str] = []
+    for i, r1 in enumerate(GRID_RANKS):
+        for j, r2 in enumerate(GRID_RANKS):
+            if i == j:
+                cells.append(f"{r1}{r2}")
+            elif i < j:
+                cells.append(f"{r1}{r2}s")
+            else:
+                cells.append(f"{r2}{r1}o")
+    return tuple(cells)
+
+
+HAND_GRID_CELLS: Final[tuple[str, ...]] = _build_hand_grid_cells()
+"""Canonical tuple of all 169 hand matrix cells in row-major grid order."""
+
+
+def _build_cell_combos() -> dict[str, tuple[Combo, ...]]:
+    """Precompute the canonical combos for each of the 169 matrix cells."""
+    result: dict[str, tuple[Combo, ...]] = {}
+    for cell in HAND_GRID_CELLS:
+        if len(cell) == 2:
+            r = Rank.from_char(cell[0])
+            result[cell] = tuple(sorted(generate_pair_combos(r), reverse=True))
+        elif cell.endswith("s"):
+            r1 = Rank.from_char(cell[0])
+            r2 = Rank.from_char(cell[1])
+            result[cell] = tuple(sorted(generate_suited_combos(r1, r2), reverse=True))
+        elif cell.endswith("o"):
+            r1 = Rank.from_char(cell[0])
+            r2 = Rank.from_char(cell[1])
+            result[cell] = tuple(sorted(generate_offsuit_combos(r1, r2), reverse=True))
+    return result
+
+
+CELL_COMBOS: Final[dict[str, tuple[Combo, ...]]] = _build_cell_combos()
+"""Mapping from each 169 hand cell to its canonical tuple of combos."""
+
+
+def combo_to_cell(combo: Combo) -> str:
+    """Return the 13x13 grid cell label for a canonical combo.
+
+    Parameters
+    ----------
+    combo : Combo
+        A 2-card combo.
+
+    Returns
+    -------
+    str
+        Matrix cell string (e.g. ``"AA"``, ``"AKs"``, ``"AKo"``).
+
+    Examples
+    --------
+    >>> from poker_equity.card import Card
+    >>> from poker_equity.range import canonical_combo, combo_to_cell
+    >>> combo_to_cell(canonical_combo(Card.from_str("Ah"), Card.from_str("Kh")))
+    'AKs'
+    >>> combo_to_cell(canonical_combo(Card.from_str("Ah"), Card.from_str("Kd")))
+    'AKo'
+    >>> combo_to_cell(canonical_combo(Card.from_str("Ah"), Card.from_str("As")))
+    'AA'
+    """
+    c1, c2 = combo
+    if c1.rank == c2.rank:
+        return f"{c1.rank.char}{c2.rank.char}"
+    high, low = (c1, c2) if c1.rank > c2.rank else (c2, c1)
+    suffix = "s" if c1.suit == c2.suit else "o"
+    return f"{high.rank.char}{low.rank.char}{suffix}"
+
+
+def _normalize_cell_name(cell: str) -> str:
+    """Normalize a hand cell string (e.g. 'aks' -> 'AKs', 'KAs' -> 'AKs', 'aa' -> 'AA')."""
+    stripped = cell.strip()
+    if len(stripped) == 2:
+        return stripped.upper()
+    if len(stripped) == 3:
+        try:
+            r1 = Rank.from_char(stripped[0])
+            r2 = Rank.from_char(stripped[1])
+            high, low = (r1, r2) if r1 >= r2 else (r2, r1)
+            return f"{high.char}{low.char}{stripped[2].lower()}"
+        except ValueError:
+            return stripped
+    return stripped
+
+
+# =========================================================================
 # Range Class
 # =========================================================================
 
@@ -776,6 +878,76 @@ class Range:
         38
         """
         combos = parse_range_string(range_str)
+        return cls(combos)
+
+    @classmethod
+    def from_matrix(
+        cls,
+        matrix: Mapping[str, float],
+        threshold: float | None = None,
+    ) -> Range:
+        """Construct a Range from a 13x13 grid mapping of hand weights.
+
+        Parameters
+        ----------
+        matrix : Mapping[str, float]
+            Mapping of hand cell labels (e.g. ``"AA"``, ``"AKs"``, ``"AKo"``)
+            to weights in ``[0.0, 1.0]``.
+        threshold : float | None, optional
+            If specified, any cell with ``weight >= threshold`` includes 100% of its
+            combos, and cells below the threshold are omitted.
+            If ``None`` (the default), the number of combos selected for each cell
+            is proportional to the weight: ``round(weight * total_combos)``.
+
+        Returns
+        -------
+        Range
+            The constructed Range instance.
+
+        Raises
+        ------
+        ValueError
+            If any cell name in *matrix* is not a valid hand cell.
+
+        Examples
+        --------
+        >>> r = Range.from_matrix({"AA": 1.0, "AKs": 1.0})
+        >>> len(r)
+        10
+        """
+        combos: set[Combo] = set()
+        for cell_raw, weight in matrix.items():
+            if weight <= 0.0:
+                continue
+
+            normalized = _normalize_cell_name(cell_raw)
+
+            # Support unsuited shorthand (e.g. "AK": 1.0 -> AKs + AKo)
+            if len(normalized) == 2 and normalized[0] != normalized[1]:
+                r1 = Rank.from_char(normalized[0])
+                r2 = Rank.from_char(normalized[1])
+                high, low = (r1, r2) if r1 >= r2 else (r2, r1)
+                suited_key = f"{high.char}{low.char}s"
+                offsuit_key = f"{high.char}{low.char}o"
+                sub_dict = {suited_key: weight, offsuit_key: weight}
+                sub_range = cls.from_matrix(sub_dict, threshold=threshold)
+                combos.update(sub_range.combos)
+                continue
+
+            if normalized not in CELL_COMBOS:
+                msg = f"Invalid hand matrix cell: {cell_raw!r}"
+                raise ValueError(msg)
+
+            cell_all = CELL_COMBOS[normalized]
+            total_possible = len(cell_all)
+
+            if threshold is not None:
+                if weight >= threshold:
+                    combos.update(cell_all)
+            else:
+                num_to_take = min(total_possible, max(0, round(weight * total_possible)))
+                combos.update(cell_all[:num_to_take])
+
         return cls(combos)
 
     @classmethod
@@ -1118,3 +1290,72 @@ class Range:
             result.add(c1)
             result.add(c2)
         return result
+
+    # -- Matrix Representation (13x13 Grid) --------------------------------
+
+    def to_matrix(self, include_zeros: bool = True) -> dict[str, float]:
+        """Convert this Range into a 13x13 grid dictionary of hand weights.
+
+        Each key is a standard poker hand label (e.g. ``"AA"``, ``"AKs"``, ``"AKo"``),
+        and each value is a float in ``[0.0, 1.0]`` representing the fraction of
+        possible combos for that hand that are included in this range.
+
+        Parameters
+        ----------
+        include_zeros : bool, default=True
+            If True, all 169 matrix cells are included (absent hands have weight 0.0).
+            If False, only cells with weight > 0.0 are returned.
+
+        Returns
+        -------
+        dict[str, float]
+            Dictionary mapping hand labels to weights in [0.0, 1.0].
+
+        Examples
+        --------
+        >>> r = Range.from_str("AA, AKs")
+        >>> m = r.to_matrix(include_zeros=False)
+        >>> m["AA"]
+        1.0
+        >>> m["AKs"]
+        1.0
+        """
+        counts: dict[str, int] = collections.defaultdict(int)
+        for combo in self._combos:
+            counts[combo_to_cell(combo)] += 1
+
+        matrix: dict[str, float] = {}
+        for cell in HAND_GRID_CELLS:
+            total_possible = len(CELL_COMBOS[cell])
+            cnt = counts.get(cell, 0)
+            if cnt > 0:
+                matrix[cell] = cnt / total_possible
+            elif include_zeros:
+                matrix[cell] = 0.0
+
+        return matrix
+
+    def to_grid_2d(self) -> list[list[float]]:
+        """Return a 13x13 nested list of weights for UI / matrix visualization.
+
+        Rows and columns correspond to ranks Ace through 2 in descending order.
+        The main diagonal contains pocket pairs, the upper-right triangle
+        contains suited hands, and the lower-left triangle contains offsuit hands.
+
+        Returns
+        -------
+        list[list[float]]
+            A 13x13 list of floats in [0.0, 1.0].
+        """
+        matrix = self.to_matrix(include_zeros=True)
+        grid: list[list[float]] = []
+        idx = 0
+        for _ in range(13):
+            row: list[float] = []
+            for _ in range(13):
+                cell = HAND_GRID_CELLS[idx]
+                row.append(matrix[cell])
+                idx += 1
+            grid.append(row)
+        return grid
+
