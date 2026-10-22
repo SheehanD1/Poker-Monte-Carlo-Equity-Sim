@@ -753,6 +753,40 @@ def _normalize_cell_name(cell: str) -> str:
     return stripped
 
 
+def _coerce_dead_cards(
+    dead_cards: Iterable[Card | str] | Card | str | None,
+) -> frozenset[Card]:
+    """Convert various dead card inputs into an immutable frozenset of Card objects."""
+    if dead_cards is None:
+        return frozenset()
+    if isinstance(dead_cards, Card):
+        return frozenset({dead_cards})
+    if isinstance(dead_cards, str):
+        stripped = dead_cards.strip()
+        if not stripped:
+            return frozenset()
+        if len(stripped) == 2:
+            return frozenset({Card.from_str(stripped)})
+        return frozenset(parse_cards(stripped))
+
+    cards: set[Card] = set()
+    for item in dead_cards:
+        if isinstance(item, Card):
+            cards.add(item)
+        elif isinstance(item, str):
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if len(stripped) == 2:
+                cards.add(Card.from_str(stripped))
+            else:
+                cards.update(parse_cards(stripped))
+        else:
+            msg = f"Expected Card or card string, got: {type(item).__name__}"
+            raise TypeError(msg)
+    return frozenset(cards)
+
+
 # =========================================================================
 # Range Class
 # =========================================================================
@@ -1262,20 +1296,21 @@ class Range:
             return rng.choice(self.combos_list)
         return random.choice(self.combos_list)
 
-    def contains_card(self, card: Card) -> bool:
+    def contains_card(self, card: Card | str) -> bool:
         """Check if any combo in the range contains the specified card.
 
         Parameters
         ----------
-        card : Card
-            The card to query.
+        card : Card | str
+            The card to query (e.g. ``Card.from_str("Ah")`` or ``"Ah"``).
 
         Returns
         -------
         bool
             True if *card* appears in at least one combo in the range.
         """
-        return any(card == c1 or card == c2 for c1, c2 in self._combos)
+        c = Card.from_str(card) if isinstance(card, str) else card
+        return any(c == c1 or c == c2 for c1, c2 in self._combos)
 
     def cards(self) -> set[Card]:
         """Return all distinct cards that appear in at least one combo in this range.
@@ -1290,6 +1325,92 @@ class Range:
             result.add(c1)
             result.add(c2)
         return result
+
+    def remove_dead_cards(
+        self,
+        dead_cards: Iterable[Card | str] | Card | str | None,
+    ) -> Range:
+        """Filter out combos that contain any of the specified dead cards.
+
+        In poker simulation and equity analysis, cards that are already known
+        (such as hero's hole cards or community cards on the board) cannot
+        appear in villain's range.  This method returns a new :class:`Range`
+        containing only the combos that remain physically possible.
+
+        Parameters
+        ----------
+        dead_cards : Iterable[Card | str] | Card | str | None
+            Cards that are unavailable.  Can be an iterable of :class:`Card`
+            objects, an iterable of 2-character strings (e.g. ``["Ah", "Kd"]``),
+            a delimited card string (e.g. ``"Ah Kd Qs"``), a single :class:`Card`,
+            or ``None``.
+
+        Returns
+        -------
+        Range
+            A new Range containing only the unblocked combos.
+
+        Examples
+        --------
+        >>> r = Range.from_str("AA")
+        >>> len(r)
+        6
+        >>> r_filtered = r.remove_dead_cards(["As", "Ah"])
+        >>> len(r_filtered)  # only AdAc remains
+        1
+        """
+        dead = _coerce_dead_cards(dead_cards)
+        if not dead or not self._combos:
+            return self
+        return Range(
+            combo for combo in self._combos
+            if combo[0] not in dead and combo[1] not in dead
+        )
+
+    def blocked_combos(
+        self,
+        dead_cards: Iterable[Card | str] | Card | str | None,
+    ) -> set[Combo]:
+        """Return the set of combos in this range that are blocked by dead cards.
+
+        Parameters
+        ----------
+        dead_cards : Iterable[Card | str] | Card | str | None
+            Dead cards to check.
+
+        Returns
+        -------
+        set[Combo]
+            Set of combos containing at least one dead card.
+        """
+        dead = _coerce_dead_cards(dead_cards)
+        if not dead:
+            return set()
+        return {
+            combo for combo in self._combos
+            if combo[0] in dead or combo[1] in dead
+        }
+
+    def is_blocked(
+        self,
+        dead_cards: Iterable[Card | str] | Card | str | None,
+    ) -> bool:
+        """Return True if at least one combo in this range is blocked by dead cards.
+
+        Parameters
+        ----------
+        dead_cards : Iterable[Card | str] | Card | str | None
+            Dead cards to check.
+
+        Returns
+        -------
+        bool
+            True if any dead card appears in this range.
+        """
+        dead = _coerce_dead_cards(dead_cards)
+        if not dead:
+            return False
+        return any(combo[0] in dead or combo[1] in dead for combo in self._combos)
 
     # -- Matrix Representation (13x13 Grid) --------------------------------
 

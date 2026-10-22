@@ -1161,3 +1161,152 @@ class TestRangeFromMatrix:
             Range.from_matrix({"XYZ": 1.0})
 
 
+# =========================================================================
+# TestRangeDeadCards
+# =========================================================================
+
+
+class TestRangeDeadCards:
+    """Tests for dead card removal and blocker functionality."""
+
+    def test_remove_dead_cards_pair_one_card(self) -> None:
+        # AA has 6 combos. If As is dead, only 3 combos remain: AhAd, AhAc, AdAc
+        r = Range.from_str("AA")
+        filtered = r.remove_dead_cards(["As"])
+        assert len(filtered) == 3
+        assert not filtered.contains_card("As")
+        assert (Card.from_str("Ah"), Card.from_str("Ad")) in filtered
+        assert (Card.from_str("Ah"), Card.from_str("Ac")) in filtered
+        assert (Card.from_str("Ad"), Card.from_str("Ac")) in filtered
+
+    def test_remove_dead_cards_pair_two_cards(self) -> None:
+        # If As and Ah are dead, only AdAc remains (1 combo)
+        r = Range.from_str("AA")
+        filtered = r.remove_dead_cards(["As", "Ah"])
+        assert len(filtered) == 1
+        assert (Card.from_str("Ad"), Card.from_str("Ac")) in filtered
+
+    def test_remove_dead_cards_pair_three_cards(self) -> None:
+        # If As, Ah, Ad are dead, 0 combos remain
+        r = Range.from_str("AA")
+        filtered = r.remove_dead_cards(["As", "Ah", "Ad"])
+        assert len(filtered) == 0
+        assert filtered.is_empty
+
+    def test_remove_dead_cards_suited_hand(self) -> None:
+        # AKs has 4 combos: AsKs, AhKh, AdKd, AcKc
+        r = Range.from_str("AKs")
+        # As blocks AsKs -> 3 combos left
+        filtered_1 = r.remove_dead_cards("As")
+        assert len(filtered_1) == 3
+        assert (Card.from_str("As"), Card.from_str("Ks")) not in filtered_1
+        assert (Card.from_str("Ah"), Card.from_str("Kh")) in filtered_1
+
+        # As and Kh block AsKs and AhKh -> 2 combos left (AdKd, AcKc)
+        filtered_2 = r.remove_dead_cards("As Kh")
+        assert len(filtered_2) == 2
+        assert (Card.from_str("Ad"), Card.from_str("Kd")) in filtered_2
+        assert (Card.from_str("Ac"), Card.from_str("Kc")) in filtered_2
+
+    def test_remove_dead_cards_offsuit_hand(self) -> None:
+        # AKo has 12 combos
+        r = Range.from_str("AKo")
+        # As blocks 3 combos containing As: AsKh, AsKd, AsKc -> 9 combos remain
+        filtered_1 = r.remove_dead_cards("As")
+        assert len(filtered_1) == 9
+
+        # As and Kh:
+        # As blocks AsKh, AsKd, AsKc (3 combos)
+        # Kh blocks AsKh, AdKh, AcKh (3 combos, AhKh is suited so not in AKo)
+        # Total blocked: 3 + 3 - 1 (overlap AsKh) = 5 combos
+        # Remaining: 12 - 5 = 7 combos
+        filtered_2 = r.remove_dead_cards("As Kh")
+        assert len(filtered_2) == 7
+
+    def test_remove_dead_cards_string_formats(self) -> None:
+        r = Range.from_str("AA, KK")
+        r1 = r.remove_dead_cards("As Ks")
+        r2 = r.remove_dead_cards(["As", "Ks"])
+        r3 = r.remove_dead_cards([Card.from_str("As"), Card.from_str("Ks")])
+        r4 = r.remove_dead_cards("As, Ks")
+        r5 = r.remove_dead_cards("As,Ks")
+        assert r1 == r2 == r3 == r4 == r5
+
+    def test_remove_dead_cards_single_card(self) -> None:
+        c = Card.from_str("As")
+        r = Range.from_str("AA")
+        assert len(r.remove_dead_cards(c)) == 3
+        assert len(r.remove_dead_cards("As")) == 3
+
+    def test_remove_dead_cards_empty_or_none(self) -> None:
+        r = Range.from_str("AA")
+        assert r.remove_dead_cards(None) == r
+        assert r.remove_dead_cards([]) == r
+        assert r.remove_dead_cards("") == r
+        assert r.remove_dead_cards("   ") == r
+
+    def test_remove_dead_cards_on_empty_range(self) -> None:
+        r = Range.empty()
+        assert r.remove_dead_cards("As Ah") == Range.empty()
+
+    def test_remove_dead_cards_full_holdem_board(self) -> None:
+        # 5 board cards: C(52-5, 2) = C(47, 2) = 47 * 46 / 2 = 1,081 live combos
+        board = [Card.from_str(s) for s in ["Ah", "Kh", "Qh", "2c", "3d"]]
+        r = Range.all()
+        live = r.remove_dead_cards(board)
+        assert len(live) == 1081
+
+    def test_remove_dead_cards_full_holdem_hero_and_board(self) -> None:
+        # 2 hero cards + 5 board cards = 7 dead cards
+        # C(52-7, 2) = C(45, 2) = 45 * 44 / 2 = 990 live combos
+        hero = [Card.from_str("As"), Card.from_str("Ks")]
+        board = [Card.from_str(s) for s in ["Qh", "Jh", "Th", "2c", "3d"]]
+        live = Range.all().remove_dead_cards(hero + board)
+        assert len(live) == 990
+
+    def test_blocked_combos(self) -> None:
+        r = Range.from_str("AA")
+        blocked = r.blocked_combos(["As"])
+        assert len(blocked) == 3
+        assert (Card.from_str("As"), Card.from_str("Ah")) in blocked
+        assert (Card.from_str("As"), Card.from_str("Ad")) in blocked
+        assert (Card.from_str("As"), Card.from_str("Ac")) in blocked
+
+        live = r.remove_dead_cards(["As"])
+        assert set(r.combos) == (set(live.combos) | blocked)
+
+    def test_blocked_combos_empty_dead_cards(self) -> None:
+        r = Range.from_str("AA")
+        assert r.blocked_combos([]) == set()
+        assert r.blocked_combos(None) == set()
+
+    def test_is_blocked(self) -> None:
+        r = Range.from_str("AA")
+        assert r.is_blocked("As") is True
+        assert r.is_blocked("2c") is False
+        assert r.is_blocked([]) is False
+        assert r.is_blocked(None) is False
+
+    def test_matrix_weights_after_card_removal(self) -> None:
+        # AA with As dead: 3 combos of 6 remain -> weight 0.5
+        r = Range.from_str("AA").remove_dead_cards(["As"])
+        m = r.to_matrix()
+        assert m["AA"] == 0.5
+
+        # AKs with As, Kh dead: 2 combos of 4 remain -> weight 0.5
+        r_ak = Range.from_str("AKs").remove_dead_cards(["As", "Kh"])
+        m_ak = r_ak.to_matrix()
+        assert m_ak["AKs"] == 0.5
+
+    def test_invalid_dead_card_type_raises(self) -> None:
+        with pytest.raises(TypeError, match="Expected Card or card string"):
+            Range.all().remove_dead_cards([42])  # type: ignore[list-item]
+
+    def test_contains_card_accepts_str(self) -> None:
+        r = Range.from_str("AKs")
+        assert r.contains_card("Ah") is True
+        assert r.contains_card(Card.from_str("Ah")) is True
+        assert r.contains_card("7c") is False
+
+
+
