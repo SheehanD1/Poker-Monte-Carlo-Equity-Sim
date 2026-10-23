@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 
 from poker_equity.card import Card
-from poker_equity.simulation import EquityResult, _build_equity_result, calculate_equity, calculate_equities
+from poker_equity.range import Range
+from poker_equity.simulation import (
+    EquityResult,
+    _build_equity_result,
+    calculate_equities,
+    calculate_equity,
+    range_vs_range_equity,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -275,3 +282,121 @@ class TestCalculateEquities:
         assert pytest.approx(results[1].equity) == 1/3
         assert pytest.approx(results[2].equity) == 1/3
         assert pytest.approx(sum(r.equity for r in results)) == 1.0
+
+
+# =========================================================================
+# Range vs Range Simulation Tests
+# =========================================================================
+
+
+class TestRangeVsRangeEquity:
+    def test_range_vs_range_aa_vs_kk(self) -> None:
+        """Known matchup: AA should have ~81-82% equity vs KK."""
+        results = range_vs_range_equity("AA", "KK", num_sims=5000, seed=42)
+        assert len(results) == 2
+        assert 0.80 < results[0].equity < 0.84
+        assert 0.16 < results[1].equity < 0.20
+        assert pytest.approx(sum(r.equity for r in results)) == 1.0
+
+    def test_range_vs_range_with_range_objects(self) -> None:
+        """Range objects can be passed directly."""
+        r1 = Range.from_str("AA")
+        r2 = Range.from_str("KK")
+        results = range_vs_range_equity(r1, r2, num_sims=1000, seed=42)
+        assert len(results) == 2
+        assert results[0].equity > 0.75
+
+    def test_range_vs_range_with_board(self) -> None:
+        """Flop where KK hits a set: Kd 2c 7s."""
+        results = range_vs_range_equity("AA", "KK", board="Kd 2c 7s", num_sims=2000, seed=42)
+        assert len(results) == 2
+        # KK with a set of Kings dominates AA
+        assert results[1].equity > 0.85
+        assert results[0].equity < 0.15
+
+    def test_range_vs_range_positional_num_sims(self) -> None:
+        """Passing num_sims as the 3rd positional argument works."""
+        results = range_vs_range_equity("AA", "KK", 2500, seed=42)
+        assert len(results) == 2
+        assert results[0].num_sims == 2500
+
+    def test_range_vs_range_identical_ranges_chop(self) -> None:
+        """Identical ranges (AA vs AA) should split equity equally (~50% each)."""
+        results = range_vs_range_equity("AA", "AA", num_sims=3000, seed=42)
+        assert len(results) == 2
+        assert 0.48 < results[0].equity < 0.52
+        assert 0.48 < results[1].equity < 0.52
+        assert pytest.approx(sum(r.equity for r in results)) == 1.0
+
+    def test_range_vs_range_convergence(self) -> None:
+        """Convergence tracking stops early on range simulations."""
+        results = range_vs_range_equity(
+            "AA", "KK",
+            num_sims=50_000,
+            seed=42,
+            convergence_threshold=0.01,
+            check_interval=100,
+        )
+        assert results[0].converged is True
+        assert results[0].num_sims < 50_000
+        assert results[0].convergence_ci <= 0.01
+
+    def test_range_vs_range_progress_callback(self) -> None:
+        """Progress callback is called periodically."""
+        progress_snapshots = []
+        results = range_vs_range_equity(
+            "AA", "KK",
+            num_sims=1000,
+            seed=42,
+            on_progress=progress_snapshots.append,
+            progress_interval=250,
+        )
+        assert len(progress_snapshots) >= 4
+        assert progress_snapshots[-1].pct_complete == 1.0
+        assert len(results) == 2
+
+
+# =========================================================================
+# calculate_equity with Ranges Tests
+# =========================================================================
+
+
+class TestCalculateEquityWithRanges:
+    def test_hero_hand_villain_range(self) -> None:
+        """Hero has a specific hand, villain has a range."""
+        hero = [C("Ah"), C("As")]
+        result = calculate_equity(hero, "KK", num_sims=2000, seed=42)
+        assert result.equity > 0.80
+
+    def test_hero_range_villain_hand(self) -> None:
+        """Hero has a range, villain has a specific hand."""
+        villain = [C("Ks"), C("Kd")]
+        result = calculate_equity("AA", villain, num_sims=2000, seed=42)
+        assert result.equity > 0.80
+
+    def test_hero_range_villain_random(self) -> None:
+        """Hero has a range, villain has a random hand (None)."""
+        result = calculate_equity("AA", villain=None, num_sims=2000, seed=42)
+        assert 0.82 < result.equity < 0.88
+
+
+# =========================================================================
+# Range Simulation Validation Tests
+# =========================================================================
+
+
+class TestRangeSimulationValidation:
+    def test_empty_range_raises(self) -> None:
+        with pytest.raises(ValueError, match="range is empty"):
+            calculate_equity(Range(), "KK", num_sims=100)
+
+    def test_board_dead_cards_block_entire_range(self) -> None:
+        # AhKh has only 1 combo, and Ah is on the board
+        with pytest.raises(ValueError, match="no valid combos remaining"):
+            calculate_equity("AhKh", "QQ", board="Ah 2c 3d", num_sims=100)
+
+    def test_conflicting_single_combos_raise(self) -> None:
+        # Both players hold AhKh, mutually exclusive assignment impossible
+        with pytest.raises(ValueError, match="No mutually exclusive combos"):
+            calculate_equity("AhKh", "AhKh", num_sims=100)
+

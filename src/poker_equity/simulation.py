@@ -34,8 +34,13 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from poker_equity.card import Card
+from poker_equity.card import Card, Rank, Suit
+from poker_equity.constants import FULL_DECK_LIST
 from poker_equity.evaluator import score_7
+from poker_equity.range import Combo, Range, canonical_combo
+
+_ALL_RANKS = list(Rank)
+_ALL_SUITS = list(Suit)
 
 
 # =========================================================================
@@ -196,29 +201,105 @@ def _confidence_interval_half_width(
 # =========================================================================
 
 
+# =========================================================================
+# Validation helpers & Input Parsing
+# =========================================================================
+
+
+def _coerce_board(board: Sequence[Card | str] | str | None) -> list[Card]:
+    """Parse and normalize community board cards.
+
+    Parameters
+    ----------
+    board : Sequence[Card | str] | str | None
+        Community cards as a sequence of Card objects or 2-character strings,
+        a delimited string (e.g. ``"Ah Kd 2s"``), or None.
+
+    Returns
+    -------
+    list[Card]
+        List of Card objects.
+    """
+    if board is None:
+        return []
+    if isinstance(board, str):
+        board_str = board.strip()
+        if not board_str:
+            return []
+        if " " in board_str or "," in board_str:
+            tokens = board_str.replace(",", " ").split()
+        elif len(board_str) % 2 == 0:
+            tokens = [board_str[i : i + 2] for i in range(0, len(board_str), 2)]
+        else:
+            tokens = [board_str]
+        return [Card.from_str(t) for t in tokens]
+    cards: list[Card] = []
+    for c in board:
+        if isinstance(c, Card):
+            cards.append(c)
+        elif isinstance(c, str):
+            cards.append(Card.from_str(c))
+        else:
+            msg = f"Invalid card type in board: {type(c).__name__}"
+            raise TypeError(msg)
+    return cards
+
+
 def _validate_multi_inputs(
-    hands: Sequence[Sequence[Card] | None],
-    board: Sequence[Card],
+    hands: Sequence[Sequence[Card] | Range | str | None],
+    board: Sequence[Card | str] | str | None,
 ) -> None:
-    """Validate simulation inputs for multiple players."""
+    """Validate simulation inputs for multiple players.
+
+    Ensures player counts, card counts, range non-emptiness, and duplicate
+    constraints are satisfied.
+    """
     if not (2 <= len(hands) <= 9):
         msg = f"Must have between 2 and 9 players, got {len(hands)}"
         raise ValueError(msg)
 
-    for i, hand in enumerate(hands):
-        if hand is not None and len(hand) != 2:
-            msg = f"Player {i+1} must have exactly 2 hole cards or be None, got {len(hand)}"
-            raise ValueError(msg)
-
-    if len(board) > 5:
-        msg = f"Board can have at most 5 cards, got {len(board)}"
+    board_cards = _coerce_board(board)
+    if len(board_cards) > 5:
+        msg = f"Board can have at most 5 cards, got {len(board_cards)}"
         raise ValueError(msg)
 
-    all_cards = list(board)
+    for i, hand in enumerate(hands):
+        if hand is None:
+            continue
+        elif isinstance(hand, Range):
+            if hand.is_empty:
+                msg = f"Player {i+1} range is empty"
+                raise ValueError(msg)
+        elif isinstance(hand, str):
+            r = Range.from_str(hand)
+            if r.is_empty:
+                msg = f"Player {i+1} range '{hand}' contains no combos"
+                raise ValueError(msg)
+        elif isinstance(hand, (list, tuple)):
+            if len(hand) != 2:
+                msg = f"Player {i+1} must have exactly 2 hole cards or be None, got {len(hand)}"
+                raise ValueError(msg)
+            c1 = Card.from_str(hand[0]) if isinstance(hand[0], str) else hand[0]
+            c2 = Card.from_str(hand[1]) if isinstance(hand[1], str) else hand[1]
+            if not isinstance(c1, Card) or not isinstance(c2, Card):
+                msg = f"Player {i+1} hole cards must be Card instances or valid card strings"
+                raise TypeError(msg)
+            if c1 == c2:
+                msg = f"Duplicate card: {c1}"
+                raise ValueError(msg)
+        else:
+            msg = (
+                f"Player {i+1} hand must be a 2-card sequence, Range, "
+                f"range string, or None, got {type(hand).__name__}"
+            )
+            raise TypeError(msg)
+
+    all_cards = list(board_cards)
     for hand in hands:
-        if hand is not None:
-            all_cards.extend(hand)
-            
+        if hand is not None and isinstance(hand, (list, tuple)):
+            for c in hand:
+                all_cards.append(Card.from_str(c) if isinstance(c, str) else c)
+
     if len(set(all_cards)) != len(all_cards):
         seen: set[Card] = set()
         for card in all_cards:
@@ -228,14 +309,129 @@ def _validate_multi_inputs(
             seen.add(card)
 
 
+def _check_combos_mutually_exclusive_2p(
+    combos1: Sequence[Combo],
+    combos2: Sequence[Combo],
+) -> bool:
+    """Return True if there is at least one disjoint pair of combos between two players."""
+    for c1 in combos1:
+        for c2 in combos2:
+            if c1[0] != c2[0] and c1[0] != c2[1] and c1[1] != c2[0] and c1[1] != c2[1]:
+                return True
+    return False
+
+
+def _check_combos_mutually_exclusive_multi(
+    combos_lists: list[Sequence[Combo]],
+    player_idx: int = 0,
+    used: frozenset[Card] = frozenset(),
+) -> bool:
+    """Backtracking check to ensure mutually exclusive card assignments exist for all players."""
+    if player_idx == len(combos_lists):
+        return True
+    for c in combos_lists[player_idx]:
+        if c[0] not in used and c[1] not in used:
+            if _check_combos_mutually_exclusive_multi(
+                combos_lists, player_idx + 1, used | {c[0], c[1]}
+            ):
+                return True
+    return False
+
+
+def _prepare_simulation_inputs(
+    hands: Sequence[Sequence[Card] | Range | str | None],
+    board: Sequence[Card | str] | str | None,
+) -> tuple[
+    list[Card],
+    list[str],
+    list[tuple[Card, Card] | None],
+    list[tuple[Combo, ...] | None],
+    list[Card],
+    bool,
+]:
+    """Parse, validate, and prepare simulation inputs for multi-player simulation."""
+    board_cards = _coerce_board(board)
+    _validate_multi_inputs(hands, board_cards)
+
+    player_kinds: list[str] = []
+    player_fixed: list[tuple[Card, Card] | None] = []
+    player_ranges: list[tuple[Combo, ...] | None] = []
+    fixed_cards: list[Card] = list(board_cards)
+    has_range = False
+
+    for i, hand in enumerate(hands):
+        if hand is None:
+            player_kinds.append("random")
+            player_fixed.append(None)
+            player_ranges.append(None)
+        elif isinstance(hand, Range):
+            has_range = True
+            player_kinds.append("range")
+            player_fixed.append(None)
+            player_ranges.append(hand.combos_list)
+        elif isinstance(hand, str):
+            r = Range.from_str(hand)
+            has_range = True
+            player_kinds.append("range")
+            player_fixed.append(None)
+            player_ranges.append(r.combos_list)
+        elif isinstance(hand, (list, tuple)):
+            c1 = Card.from_str(hand[0]) if isinstance(hand[0], str) else hand[0]
+            c2 = Card.from_str(hand[1]) if isinstance(hand[1], str) else hand[1]
+            fixed = canonical_combo(c1, c2)
+            player_kinds.append("fixed")
+            player_fixed.append(fixed)
+            player_ranges.append(None)
+            fixed_cards.extend(fixed)
+        else:
+            msg = f"Player {i+1} hand must be a 2-card sequence, Range, range string, or None"
+            raise TypeError(msg)
+
+    if has_range:
+        dead_set = set(fixed_cards)
+        filtered_ranges: list[tuple[Combo, ...] | None] = []
+        for i, kind in enumerate(player_kinds):
+            if kind == "range":
+                combos = player_ranges[i]
+                assert combos is not None
+                live = tuple(
+                    c for c in combos if c[0] not in dead_set and c[1] not in dead_set
+                )
+                if not live:
+                    msg = f"Player {i+1} range has no valid combos remaining after removing dead cards"
+                    raise ValueError(msg)
+                filtered_ranges.append(live)
+            else:
+                filtered_ranges.append(None)
+        player_ranges = filtered_ranges
+
+        # Check mutual exclusivity across range players
+        range_indices = [i for i, k in enumerate(player_kinds) if k == "range"]
+        if len(range_indices) == 1:
+            pass  # 1 range player with live combos; valid deal is guaranteed
+        elif len(range_indices) == 2:
+            r1 = player_ranges[range_indices[0]]
+            r2 = player_ranges[range_indices[1]]
+            assert r1 is not None and r2 is not None
+            if not _check_combos_mutually_exclusive_2p(r1, r2):
+                raise ValueError("No mutually exclusive combos available between players")
+        else:
+            combos_to_check = [player_ranges[idx] for idx in range_indices]
+            assert all(cl is not None for cl in combos_to_check)
+            if not _check_combos_mutually_exclusive_multi(combos_to_check):
+                raise ValueError("No mutually exclusive combos available between players")
+
+    return board_cards, player_kinds, player_fixed, player_ranges, fixed_cards, has_range
+
+
 # =========================================================================
 # Core simulation
 # =========================================================================
 
 
 def calculate_equities(
-    hands: Sequence[Sequence[Card] | None],
-    board: Sequence[Card] | None = None,
+    hands: Sequence[Sequence[Card] | Range | str | None],
+    board: Sequence[Card | str] | str | None = None,
     *,
     num_sims: int = 10_000,
     seed: int | None = None,
@@ -246,12 +442,18 @@ def calculate_equities(
 ) -> list[EquityResult]:
     """Calculate equities for a multi-way pot via Monte Carlo simulation.
 
+    Supports fixed 2-card hands, :class:`Range` instances, range syntax strings
+    (e.g. ``"QQ+, AKs"``), and ``None`` for random hands.
+
     Parameters
     ----------
     hands:
-        List of hole cards for each player. Use ``None`` for random hands.
+        List of hole cards or ranges for each player (2 to 9 players).
+        Elements can be a 2-card sequence, a :class:`Range` object,
+        a range string, or ``None`` (for a random hand).
     board:
-        Known community cards (0 to 5).
+        Known community cards (0 to 5), as a sequence of cards, a string,
+        or ``None`` (preflop).
     num_sims:
         Maximum number of Monte Carlo simulations to run.
     seed:
@@ -264,26 +466,19 @@ def calculate_equities(
         ``None`` (the default) disables early stopping.
     check_interval:
         How often (in number of simulations) to check for convergence.
-        Smaller values detect convergence sooner but add overhead.
         Default is 100.
     on_progress:
         Optional callback invoked periodically with a :class:`ProgressInfo`
-        snapshot.  Useful for driving progress bars or real-time UI
-        updates.  ``None`` (the default) disables progress reporting.
+        snapshot.
     progress_interval:
         How often (in number of simulations) to invoke ``on_progress``.
-        Default is 500.  Ignored when ``on_progress`` is ``None``.
+        Default is 500.
 
     Returns
     -------
     list[EquityResult]
         The simulation results for each player in the same order as `hands`.
     """
-    if board is None:
-        board = []
-
-    _validate_multi_inputs(hands, board)
-
     if num_sims <= 0:
         msg = f"num_sims must be positive, got {num_sims}"
         raise ValueError(msg)
@@ -300,32 +495,19 @@ def calculate_equities(
         msg = f"progress_interval must be positive, got {progress_interval}"
         raise ValueError(msg)
 
-    known_cards = set(board)
-    for hand in hands:
-        if hand is not None:
-            known_cards.update(hand)
-            
-    stub = [
-        Card(rank, suit)
-        for rank in _ALL_RANKS
-        for suit in _ALL_SUITS
-        if Card(rank, suit) not in known_cards
-    ]
+    (
+        board_cards,
+        player_kinds,
+        player_fixed,
+        player_ranges,
+        fixed_cards,
+        has_range,
+    ) = _prepare_simulation_inputs(hands, board)
 
-    board_list = list(board)
-    board_needed = 5 - len(board_list)
-    random_hands_count = sum(1 for h in hands if h is None)
-    cards_to_deal = board_needed + 2 * random_hands_count
-    
     num_players = len(hands)
-    
-    # Pre-build the fixed parts of each player's 7-card hand
-    fixed_hands_data = [
-        list(h) + board_list if h is not None else [] 
-        for h in hands
-    ]
-    
+    board_needed = 5 - len(board_cards)
     rng = random.Random(seed)
+
     wins = [0] * num_players
     ties = [0] * num_players
     losses = [0] * num_players
@@ -337,108 +519,272 @@ def calculate_equities(
     welford_m2 = [0.0] * num_players
     converged = False
     final_ci = 0.0
-    actual_sims = num_sims  # may be reduced by early stopping
+    actual_sims = num_sims
 
     t_start = time.perf_counter()
 
-    for sim_idx in range(1, num_sims + 1):
-        dealt = rng.sample(stub, cards_to_deal)
-        community_dealt = dealt[:board_needed]
-        
-        scores = []
-        random_cards_index = board_needed
-        
-        for i, (hand, fixed) in enumerate(zip(hands, fixed_hands_data)):
-            if hand is not None:
-                hand_score = score_7(fixed + community_dealt)
-            else:
-                hole1 = dealt[random_cards_index]
-                hole2 = dealt[random_cards_index + 1]
-                random_cards_index += 2
-                hand_score = score_7(board_list + community_dealt + [hole1, hole2])
-            scores.append(hand_score)
-            
-        max_score = max(scores)
-        
-        # Determine winners
-        winners = []
-        for i in range(num_players):
-            if scores[i] == max_score:
-                winners.append(i)
-            else:
-                losses[i] += 1
-                
-        num_winners = len(winners)
-        pot_share = 1.0 / num_winners
-        
-        for i in winners:
-            if num_winners == 1:
-                wins[i] += 1
-            else:
-                ties[i] += 1
-            equity_sums[i] += pot_share
+    if not has_range:
+        # -------------------------------------------------------------
+        # Fast path: All players are fixed hands or random hands
+        # -------------------------------------------------------------
+        known_cards = set(fixed_cards)
+        stub = [c for c in FULL_DECK_LIST if c not in known_cards]
+        random_hands_count = sum(1 for k in player_kinds if k == "random")
+        cards_to_deal = board_needed + 2 * random_hands_count
 
-        # Update Welford's running statistics for each player
-        if tracking:
-            for p in range(num_players):
-                # This iteration's outcome: pot share earned
-                x = pot_share if p in winners else 0.0
-                delta = x - welford_mean[p]
-                welford_mean[p] += delta / sim_idx
-                delta2 = x - welford_mean[p]
-                welford_m2[p] += delta * delta2
+        fixed_hands_data = [
+            list(player_fixed[i]) + board_cards if player_fixed[i] is not None else []
+            for i in range(num_players)
+        ]
 
-            # Periodically check convergence and fire progress callback
+        for sim_idx in range(1, num_sims + 1):
+            dealt = rng.sample(stub, cards_to_deal)
+            community_dealt = dealt[:board_needed]
+
+            scores = []
+            random_cards_index = board_needed
+
+            for i in range(num_players):
+                if player_fixed[i] is not None:
+                    hand_score = score_7(fixed_hands_data[i] + community_dealt)
+                else:
+                    h1 = dealt[random_cards_index]
+                    h2 = dealt[random_cards_index + 1]
+                    random_cards_index += 2
+                    hand_score = score_7(board_cards + community_dealt + [h1, h2])
+                scores.append(hand_score)
+
+            max_score = max(scores)
+            winners = []
+            for i in range(num_players):
+                if scores[i] == max_score:
+                    winners.append(i)
+                else:
+                    losses[i] += 1
+
+            num_winners = len(winners)
+            pot_share = 1.0 / num_winners
+
+            for i in winners:
+                if num_winners == 1:
+                    wins[i] += 1
+                else:
+                    ties[i] += 1
+                equity_sums[i] += pot_share
+
+            if tracking:
+                for p in range(num_players):
+                    x = pot_share if p in winners else 0.0
+                    delta = x - welford_mean[p]
+                    welford_mean[p] += delta / sim_idx
+                    delta2 = x - welford_mean[p]
+                    welford_m2[p] += delta * delta2
+
+                if sim_idx >= _MIN_CONVERGENCE_SIMS and sim_idx % check_interval == 0:
+                    if on_progress is not None:
+                        current_eqs = [
+                            equity_sums[p] / sim_idx for p in range(num_players)
+                        ]
+                        on_progress(
+                            ProgressInfo(
+                                sims_completed=sim_idx,
+                                sims_total=num_sims,
+                                pct_complete=sim_idx / num_sims,
+                                current_equities=current_eqs,
+                                elapsed_seconds=time.perf_counter() - t_start,
+                            )
+                        )
+
+                    all_converged = True
+                    max_ci = 0.0
+                    for p in range(num_players):
+                        var = welford_m2[p] / (sim_idx - 1)
+                        ci = _confidence_interval_half_width(var, sim_idx)
+                        if ci > max_ci:
+                            max_ci = ci
+                        if ci > convergence_threshold:
+                            all_converged = False
+                            break
+
+                    if all_converged:
+                        converged = True
+                        final_ci = max_ci
+                        actual_sims = sim_idx
+                        break
+
             if (
-                sim_idx >= _MIN_CONVERGENCE_SIMS
-                and sim_idx % check_interval == 0
+                on_progress is not None
+                and not tracking
+                and sim_idx % progress_interval == 0
             ):
-                # Fire progress callback at convergence check points
-                if on_progress is not None:
-                    current_eqs = [
-                        equity_sums[p] / sim_idx for p in range(num_players)
-                    ]
-                    on_progress(ProgressInfo(
+                current_eqs = [
+                    equity_sums[p] / sim_idx for p in range(num_players)
+                ]
+                on_progress(
+                    ProgressInfo(
                         sims_completed=sim_idx,
                         sims_total=num_sims,
                         pct_complete=sim_idx / num_sims,
                         current_equities=current_eqs,
                         elapsed_seconds=time.perf_counter() - t_start,
-                    ))
+                    )
+                )
 
-                all_converged = True
-                max_ci = 0.0
-                for p in range(num_players):
-                    var = welford_m2[p] / (sim_idx - 1)
-                    ci = _confidence_interval_half_width(var, sim_idx)
-                    if ci > max_ci:
-                        max_ci = ci
-                    if ci > convergence_threshold:
-                        all_converged = False
+    else:
+        # -------------------------------------------------------------
+        # Range path: At least one player has a Range
+        # -------------------------------------------------------------
+        range_indices = [i for i, k in enumerate(player_kinds) if k == "range"]
+        num_range_players = len(range_indices)
+        random_hands_count = sum(1 for k in player_kinds if k == "random")
+        cards_from_stub = board_needed + 2 * random_hands_count
+        base_stub = [c for c in FULL_DECK_LIST if c not in fixed_cards]
+
+        if num_range_players == 1:
+            r_single_idx = range_indices[0]
+            r_combos_single = player_ranges[r_single_idx]
+            assert r_combos_single is not None
+        elif num_range_players == 2:
+            r_idx_1, r_idx_2 = range_indices[0], range_indices[1]
+            r_combos_1 = player_ranges[r_idx_1]
+            r_combos_2 = player_ranges[r_idx_2]
+            assert r_combos_1 is not None and r_combos_2 is not None
+        else:
+            r_combos_multi = [player_ranges[idx] for idx in range_indices]
+
+        sim_hands: list[tuple[Card, Card] | None] = [
+            player_fixed[i] for i in range(num_players)
+        ]
+
+        for sim_idx in range(1, num_sims + 1):
+            if num_range_players == 1:
+                c = rng.choice(r_combos_single)
+                sim_hands[r_single_idx] = c
+                dealt_range_cards = (c[0], c[1])
+            elif num_range_players == 2:
+                while True:
+                    c1 = rng.choice(r_combos_1)
+                    c2 = rng.choice(r_combos_2)
+                    if (
+                        c1[0] != c2[0]
+                        and c1[0] != c2[1]
+                        and c1[1] != c2[0]
+                        and c1[1] != c2[1]
+                    ):
+                        break
+                sim_hands[r_idx_1] = c1
+                sim_hands[r_idx_2] = c2
+                dealt_range_cards = (c1[0], c1[1], c2[0], c2[1])
+            else:
+                while True:
+                    sampled = [rng.choice(cl) for cl in r_combos_multi]
+                    used_set: set[Card] = set()
+                    conflict = False
+                    for c in sampled:
+                        if c[0] in used_set or c[1] in used_set:
+                            conflict = True
+                            break
+                        used_set.add(c[0])
+                        used_set.add(c[1])
+                    if not conflict:
+                        for idx, c in zip(range_indices, sampled):
+                            sim_hands[idx] = c
+                        dealt_range_cards = tuple(used_set)
                         break
 
-                if all_converged:
-                    converged = True
-                    final_ci = max_ci
-                    actual_sims = sim_idx
-                    break
+            if cards_from_stub > 0:
+                stub = [c for c in base_stub if c not in dealt_range_cards]
+                dealt = rng.sample(stub, cards_from_stub)
+                community_dealt = dealt[:board_needed]
+                rand_idx = board_needed
+                for i, k in enumerate(player_kinds):
+                    if k == "random":
+                        sim_hands[i] = (dealt[rand_idx], dealt[rand_idx + 1])
+                        rand_idx += 2
+            else:
+                community_dealt = []
 
-        # Fire periodic progress callback
-        if (
-            on_progress is not None
-            and not tracking  # avoid double-firing when convergence also checks
-            and sim_idx % progress_interval == 0
-        ):
-            current_eqs = [
-                equity_sums[p] / sim_idx for p in range(num_players)
+            full_board = board_cards + community_dealt
+            scores = [
+                score_7(full_board + [sim_hands[i][0], sim_hands[i][1]])  # type: ignore[index]
+                for i in range(num_players)
             ]
-            on_progress(ProgressInfo(
-                sims_completed=sim_idx,
-                sims_total=num_sims,
-                pct_complete=sim_idx / num_sims,
-                current_equities=current_eqs,
-                elapsed_seconds=time.perf_counter() - t_start,
-            ))
+
+            max_score = max(scores)
+            winners = []
+            for i in range(num_players):
+                if scores[i] == max_score:
+                    winners.append(i)
+                else:
+                    losses[i] += 1
+
+            num_winners = len(winners)
+            pot_share = 1.0 / num_winners
+
+            for i in winners:
+                if num_winners == 1:
+                    wins[i] += 1
+                else:
+                    ties[i] += 1
+                equity_sums[i] += pot_share
+
+            if tracking:
+                for p in range(num_players):
+                    x = pot_share if p in winners else 0.0
+                    delta = x - welford_mean[p]
+                    welford_mean[p] += delta / sim_idx
+                    delta2 = x - welford_mean[p]
+                    welford_m2[p] += delta * delta2
+
+                if sim_idx >= _MIN_CONVERGENCE_SIMS and sim_idx % check_interval == 0:
+                    if on_progress is not None:
+                        current_eqs = [
+                            equity_sums[p] / sim_idx for p in range(num_players)
+                        ]
+                        on_progress(
+                            ProgressInfo(
+                                sims_completed=sim_idx,
+                                sims_total=num_sims,
+                                pct_complete=sim_idx / num_sims,
+                                current_equities=current_eqs,
+                                elapsed_seconds=time.perf_counter() - t_start,
+                            )
+                        )
+
+                    all_converged = True
+                    max_ci = 0.0
+                    for p in range(num_players):
+                        var = welford_m2[p] / (sim_idx - 1)
+                        ci = _confidence_interval_half_width(var, sim_idx)
+                        if ci > max_ci:
+                            max_ci = ci
+                        if ci > convergence_threshold:
+                            all_converged = False
+                            break
+
+                    if all_converged:
+                        converged = True
+                        final_ci = max_ci
+                        actual_sims = sim_idx
+                        break
+
+            if (
+                on_progress is not None
+                and not tracking
+                and sim_idx % progress_interval == 0
+            ):
+                current_eqs = [
+                    equity_sums[p] / sim_idx for p in range(num_players)
+                ]
+                on_progress(
+                    ProgressInfo(
+                        sims_completed=sim_idx,
+                        sims_total=num_sims,
+                        pct_complete=sim_idx / num_sims,
+                        current_equities=current_eqs,
+                        elapsed_seconds=time.perf_counter() - t_start,
+                    )
+                )
 
     # Compute final CI if we tracked but didn't converge early
     if tracking and not converged:
@@ -466,9 +812,9 @@ def calculate_equities(
 
 
 def calculate_equity(
-    hero: Sequence[Card],
-    villain: Sequence[Card] | None = None,
-    board: Sequence[Card] | None = None,
+    hero: Sequence[Card] | Range | str,
+    villain: Sequence[Card] | Range | str | None = None,
+    board: Sequence[Card | str] | str | None = None,
     *,
     num_sims: int = 10_000,
     seed: int | None = None,
@@ -479,22 +825,21 @@ def calculate_equity(
 ) -> EquityResult:
     """Calculate hero's equity against villain via Monte Carlo simulation.
 
-    This is a convenience wrapper around :func:`calculate_equities` for 
-    heads-up scenarios.
+    Supports specific hands, ranges (as :class:`Range` or range syntax strings),
+    and random hands (when villain is ``None``).
 
     Parameters
     ----------
     hero:
-        Hero's two hole cards.
+        Hero's hole cards (2-card sequence), :class:`Range`, or range string.
     villain:
-        Villain's two hole cards, or ``None`` to evaluate against a
-        random hand (any two unknown cards).
+        Villain's hole cards, :class:`Range`, range string, or ``None`` to
+        evaluate against any two unknown cards.
     board:
-        Known community cards (0 to 5).  ``None`` or empty list means
-        preflop (no board cards dealt yet).
+        Known community cards (0 to 5), as a sequence of cards, a string,
+        or ``None`` (preflop).
     num_sims:
-        Maximum number of Monte Carlo simulations to run.  Higher values
-        give more accurate results but take longer.  Default is 10,000.
+        Maximum number of Monte Carlo simulations to run. Default is 10,000.
     seed:
         Optional PRNG seed for reproducible results.
     convergence_threshold:
@@ -511,12 +856,12 @@ def calculate_equity(
     Returns
     -------
     EquityResult
-        The simulation results with win/tie/loss counts and equity.
+        The simulation results with win/tie/loss counts and equity for Hero.
 
     Raises
     ------
     ValueError
-        If inputs are invalid (wrong card count, duplicates, etc.).
+        If inputs are invalid (wrong card count, duplicates, empty ranges, etc.).
 
     Examples
     --------
@@ -525,6 +870,9 @@ def calculate_equity(
     >>> villain = [Card.from_str("7s"), Card.from_str("2d")]
     >>> result = calculate_equity(hero, villain, seed=42)
     >>> result.equity > 0.5  # AKs is a big favorite over 72o
+    True
+    >>> range_result = calculate_equity(hero="AA", villain="KK", seed=42)
+    >>> range_result.equity > 0.80
     True
     """
     results = calculate_equities(
@@ -540,11 +888,77 @@ def calculate_equity(
     return results[0]
 
 
-# ---------------------------------------------------------------------------
-# Internal constants (avoid importing from card at module level for speed)
-# ---------------------------------------------------------------------------
+def range_vs_range_equity(
+    range1: Range | str | Sequence[Card],
+    range2: Range | str | Sequence[Card],
+    board: Sequence[Card | str] | str | None = None,
+    num_sims: int = 10_000,
+    *,
+    seed: int | None = None,
+    convergence_threshold: float | None = None,
+    check_interval: int = 100,
+    on_progress: ProgressCallback | None = None,
+    progress_interval: int = 500,
+) -> list[EquityResult]:
+    """Calculate equity between two ranges (or hands) via Monte Carlo simulation.
 
-from poker_equity.card import Rank, Suit  # noqa: E402
+    In Texas Hold'em, evaluating range vs range accounts for card removal
+    (blockers), board interaction, and runout distributions across all
+    possible combinations.
 
-_ALL_RANKS = list(Rank)
-_ALL_SUITS = list(Suit)
+    Parameters
+    ----------
+    range1 : Range | str | Sequence[Card]
+        Player 1's starting range or specific hand.  Can be a :class:`Range`
+        instance, a standard poker range string (e.g. ``"QQ+, AKs"``),
+        or a 2-card sequence.
+    range2 : Range | str | Sequence[Card]
+        Player 2's starting range or specific hand.
+    board : Sequence[Card | str] | str | None, optional
+        Community cards dealt so far (0 to 5 cards), as a string
+        (e.g. ``"Ah Kd 2s"``), a sequence of cards/strings, or ``None`` (preflop).
+        If an integer is passed here by positional invocation, it is
+        interpreted as *num_sims*.
+    num_sims : int, default 10,000
+        Maximum number of Monte Carlo simulations to run.
+    seed : int | None, optional
+        Optional PRNG seed for reproducible results.
+    convergence_threshold : float | None, optional
+        If set, the simulation halts early once the 95% confidence interval
+        half-width for both players drops below this threshold.
+    check_interval : int, default 100
+        How often (in simulations) to check convergence.
+    on_progress : ProgressCallback | None, optional
+        Optional callback invoked with a :class:`ProgressInfo` snapshot.
+    progress_interval : int, default 500
+        How often (in simulations) to invoke *on_progress*.
+
+    Returns
+    -------
+    list[EquityResult]
+        A 2-element list containing ``[range1_result, range2_result]``.
+
+    Examples
+    --------
+    >>> from poker_equity.simulation import range_vs_range_equity
+    >>> r1, r2 = range_vs_range_equity("AA", "KK", num_sims=5000, seed=42)
+    >>> r1.equity > 0.80
+    True
+    >>> r1.equity + r2.equity == 1.0
+    True
+    """
+    if isinstance(board, int):
+        num_sims = board
+        board = None
+
+    return calculate_equities(
+        hands=[range1, range2],
+        board=board,
+        num_sims=num_sims,
+        seed=seed,
+        convergence_threshold=convergence_threshold,
+        check_interval=check_interval,
+        on_progress=on_progress,
+        progress_interval=progress_interval,
+    )
+

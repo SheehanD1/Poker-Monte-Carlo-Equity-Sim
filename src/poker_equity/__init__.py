@@ -75,6 +75,16 @@ from poker_equity.range import (
     parse_range_string,
 )
 
+# -- Simulation & Equities --------------------------------------------------
+from poker_equity.simulation import (
+    EquityResult,
+    ProgressCallback,
+    ProgressInfo,
+    calculate_equities,
+    calculate_equity,
+    range_vs_range_equity,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -109,6 +119,13 @@ __all__ = [
     "generate_suited_combos",
     "generate_unpaired_combos",
     "parse_range_string",
+    # Simulation & Equities
+    "EquityResult",
+    "ProgressCallback",
+    "ProgressInfo",
+    "calculate_equity",
+    "calculate_equities",
+    "range_vs_range_equity",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
@@ -122,4 +139,5 @@ __all__ = [
     "cards_to_str",
     "validate_no_duplicates",
 ]
+
 
