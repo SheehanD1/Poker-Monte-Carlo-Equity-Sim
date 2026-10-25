@@ -85,6 +85,14 @@ from poker_equity.simulation import (
     range_vs_range_equity,
 )
 
+# -- Range vs Hand Breakdown ------------------------------------------------
+from poker_equity.breakdown import (
+    RangeBreakdown,
+    hand_vs_range_breakdown,
+    range_breakdown,
+    range_vs_hand_breakdown,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -126,6 +134,11 @@ __all__ = [
     "calculate_equity",
     "calculate_equities",
     "range_vs_range_equity",
+    # Range vs Hand Breakdown
+    "RangeBreakdown",
+    "hand_vs_range_breakdown",
+    "range_breakdown",
+    "range_vs_hand_breakdown",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
