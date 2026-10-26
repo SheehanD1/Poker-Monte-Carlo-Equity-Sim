@@ -346,6 +346,8 @@ def _prepare_simulation_inputs(
     list[str],
     list[tuple[Card, Card] | None],
     list[tuple[Combo, ...] | None],
+    list[tuple[float, ...] | None],
+    list[bool],
     list[Card],
     bool,
 ]:
@@ -356,6 +358,8 @@ def _prepare_simulation_inputs(
     player_kinds: list[str] = []
     player_fixed: list[tuple[Card, Card] | None] = []
     player_ranges: list[tuple[Combo, ...] | None] = []
+    player_weights: list[tuple[float, ...] | None] = []
+    player_is_weighted: list[bool] = []
     fixed_cards: list[Card] = list(board_cards)
     has_range = False
 
@@ -364,17 +368,23 @@ def _prepare_simulation_inputs(
             player_kinds.append("random")
             player_fixed.append(None)
             player_ranges.append(None)
+            player_weights.append(None)
+            player_is_weighted.append(False)
         elif isinstance(hand, Range):
             has_range = True
             player_kinds.append("range")
             player_fixed.append(None)
             player_ranges.append(hand.combos_list)
+            player_weights.append(hand.weights_list)
+            player_is_weighted.append(hand.is_weighted)
         elif isinstance(hand, str):
             r = Range.from_str(hand)
             has_range = True
             player_kinds.append("range")
             player_fixed.append(None)
             player_ranges.append(r.combos_list)
+            player_weights.append(r.weights_list)
+            player_is_weighted.append(r.is_weighted)
         elif isinstance(hand, (list, tuple)):
             c1 = Card.from_str(hand[0]) if isinstance(hand[0], str) else hand[0]
             c2 = Card.from_str(hand[1]) if isinstance(hand[1], str) else hand[1]
@@ -382,6 +392,8 @@ def _prepare_simulation_inputs(
             player_kinds.append("fixed")
             player_fixed.append(fixed)
             player_ranges.append(None)
+            player_weights.append(None)
+            player_is_weighted.append(False)
             fixed_cards.extend(fixed)
         else:
             msg = f"Player {i+1} hand must be a 2-card sequence, Range, range string, or None"
@@ -390,20 +402,32 @@ def _prepare_simulation_inputs(
     if has_range:
         dead_set = set(fixed_cards)
         filtered_ranges: list[tuple[Combo, ...] | None] = []
+        filtered_weights: list[tuple[float, ...] | None] = []
+        filtered_is_weighted: list[bool] = []
         for i, kind in enumerate(player_kinds):
             if kind == "range":
                 combos = player_ranges[i]
-                assert combos is not None
-                live = tuple(
-                    c for c in combos if c[0] not in dead_set and c[1] not in dead_set
-                )
-                if not live:
+                weights = player_weights[i]
+                assert combos is not None and weights is not None
+                live_combos = []
+                live_weights = []
+                for c, w in zip(combos, weights):
+                    if c[0] not in dead_set and c[1] not in dead_set:
+                        live_combos.append(c)
+                        live_weights.append(w)
+                if not live_combos:
                     msg = f"Player {i+1} range has no valid combos remaining after removing dead cards"
                     raise ValueError(msg)
-                filtered_ranges.append(live)
+                filtered_ranges.append(tuple(live_combos))
+                filtered_weights.append(tuple(live_weights))
+                filtered_is_weighted.append(any(w < 1.0 for w in live_weights))
             else:
                 filtered_ranges.append(None)
+                filtered_weights.append(None)
+                filtered_is_weighted.append(False)
         player_ranges = filtered_ranges
+        player_weights = filtered_weights
+        player_is_weighted = filtered_is_weighted
 
         # Check mutual exclusivity across range players
         range_indices = [i for i, k in enumerate(player_kinds) if k == "range"]
@@ -421,7 +445,16 @@ def _prepare_simulation_inputs(
             if not _check_combos_mutually_exclusive_multi(combos_to_check):
                 raise ValueError("No mutually exclusive combos available between players")
 
-    return board_cards, player_kinds, player_fixed, player_ranges, fixed_cards, has_range
+    return (
+        board_cards,
+        player_kinds,
+        player_fixed,
+        player_ranges,
+        player_weights,
+        player_is_weighted,
+        fixed_cards,
+        has_range,
+    )
 
 
 # =========================================================================
@@ -500,6 +533,8 @@ def calculate_equities(
         player_kinds,
         player_fixed,
         player_ranges,
+        player_weights,
+        player_is_weighted,
         fixed_cards,
         has_range,
     ) = _prepare_simulation_inputs(hands, board)
@@ -643,14 +678,22 @@ def calculate_equities(
         if num_range_players == 1:
             r_single_idx = range_indices[0]
             r_combos_single = player_ranges[r_single_idx]
+            r_weights_single = player_weights[r_single_idx]
+            r_is_w_single = player_is_weighted[r_single_idx]
             assert r_combos_single is not None
         elif num_range_players == 2:
             r_idx_1, r_idx_2 = range_indices[0], range_indices[1]
             r_combos_1 = player_ranges[r_idx_1]
             r_combos_2 = player_ranges[r_idx_2]
+            r_weights_1 = player_weights[r_idx_1]
+            r_weights_2 = player_weights[r_idx_2]
+            r_is_w1 = player_is_weighted[r_idx_1]
+            r_is_w2 = player_is_weighted[r_idx_2]
             assert r_combos_1 is not None and r_combos_2 is not None
         else:
             r_combos_multi = [player_ranges[idx] for idx in range_indices]
+            r_weights_multi = [player_weights[idx] for idx in range_indices]
+            r_is_w_multi = [player_is_weighted[idx] for idx in range_indices]
 
         sim_hands: list[tuple[Card, Card] | None] = [
             player_fixed[i] for i in range(num_players)
@@ -658,13 +701,22 @@ def calculate_equities(
 
         for sim_idx in range(1, num_sims + 1):
             if num_range_players == 1:
-                c = rng.choice(r_combos_single)
+                if r_is_w_single:
+                    c = rng.choices(r_combos_single, weights=r_weights_single, k=1)[0]
+                else:
+                    c = rng.choice(r_combos_single)
                 sim_hands[r_single_idx] = c
                 dealt_range_cards = (c[0], c[1])
             elif num_range_players == 2:
                 while True:
-                    c1 = rng.choice(r_combos_1)
-                    c2 = rng.choice(r_combos_2)
+                    if r_is_w1:
+                        c1 = rng.choices(r_combos_1, weights=r_weights_1, k=1)[0]
+                    else:
+                        c1 = rng.choice(r_combos_1)
+                    if r_is_w2:
+                        c2 = rng.choices(r_combos_2, weights=r_weights_2, k=1)[0]
+                    else:
+                        c2 = rng.choice(r_combos_2)
                     if (
                         c1[0] != c2[0]
                         and c1[0] != c2[1]
@@ -677,7 +729,10 @@ def calculate_equities(
                 dealt_range_cards = (c1[0], c1[1], c2[0], c2[1])
             else:
                 while True:
-                    sampled = [rng.choice(cl) for cl in r_combos_multi]
+                    sampled = [
+                        rng.choices(cl, weights=wl, k=1)[0] if is_w else rng.choice(cl)
+                        for cl, wl, is_w in zip(r_combos_multi, r_weights_multi, r_is_w_multi)
+                    ]
                     used_set: set[Card] = set()
                     conflict = False
                     for c in sampled:

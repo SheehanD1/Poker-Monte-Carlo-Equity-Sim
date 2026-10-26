@@ -177,32 +177,49 @@ class RangeBreakdown(dict[Combo, EquityResult]):
         return len(self)
 
     @property
+    def total_combos(self) -> float:
+        """Total weighted combos present in this breakdown."""
+        return self._range.total_combos
+
+    @property
     def overall_equity(self) -> float:
-        """Arithmetic mean equity across all unblocked combos in the breakdown."""
+        """Weighted average equity across all unblocked combos in the breakdown."""
         if not self:
             return 0.0
-        return sum(r.equity for r in self.values()) / len(self)
+        total_weight = sum(self._range.get_weight(c) for c in self)
+        if total_weight <= 0.0:
+            return 0.0
+        return sum(r.equity * self._range.get_weight(c) for c, r in self.items()) / total_weight
 
     @property
     def overall_win_pct(self) -> float:
-        """Average win percentage across all unblocked combos."""
+        """Weighted average win percentage across all unblocked combos."""
         if not self:
             return 0.0
-        return sum(r.win_pct for r in self.values()) / len(self)
+        total_weight = sum(self._range.get_weight(c) for c in self)
+        if total_weight <= 0.0:
+            return 0.0
+        return sum(r.win_pct * self._range.get_weight(c) for c, r in self.items()) / total_weight
 
     @property
     def overall_tie_pct(self) -> float:
-        """Average tie percentage across all unblocked combos."""
+        """Weighted average tie percentage across all unblocked combos."""
         if not self:
             return 0.0
-        return sum(r.tie_pct for r in self.values()) / len(self)
+        total_weight = sum(self._range.get_weight(c) for c in self)
+        if total_weight <= 0.0:
+            return 0.0
+        return sum(r.tie_pct * self._range.get_weight(c) for c, r in self.items()) / total_weight
 
     @property
     def overall_loss_pct(self) -> float:
-        """Average loss percentage across all unblocked combos."""
+        """Weighted average loss percentage across all unblocked combos."""
         if not self:
             return 0.0
-        return sum(r.loss_pct for r in self.values()) / len(self)
+        total_weight = sum(self._range.get_weight(c) for c in self)
+        if total_weight <= 0.0:
+            return 0.0
+        return sum(r.loss_pct * self._range.get_weight(c) for c, r in self.items()) / total_weight
 
     @property
     def hero_equity(self) -> float:
@@ -271,16 +288,34 @@ class RangeBreakdown(dict[Combo, EquityResult]):
         Returns
         -------
         dict[str, float]
-            Dictionary mapping cell notation to its average equity across live combos.
+            Dictionary mapping cell notation to its weighted average equity across live combos.
         """
-        cell_equities: dict[str, list[float]] = {}
+        cell_equity_sums: dict[str, float] = {}
+        cell_weight_sums: dict[str, float] = {}
         for combo, result in self.items():
             cell = combo_to_cell(combo)
-            cell_equities.setdefault(cell, []).append(result.equity)
+            w = self._range.get_weight(combo)
+            cell_equity_sums[cell] = cell_equity_sums.get(cell, 0.0) + result.equity * w
+            cell_weight_sums[cell] = cell_weight_sums.get(cell, 0.0) + w
+
         return {
-            cell: sum(eqs) / len(eqs)
-            for cell, eqs in cell_equities.items()
+            cell: (cell_equity_sums[cell] / cell_weight_sums[cell] if cell_weight_sums[cell] > 0.0 else 0.0)
+            for cell in cell_equity_sums
         }
+
+    def by_cell_weights(self) -> dict[str, float]:
+        """Count the total frequency weight of live combos in each 169-grid cell.
+
+        Returns
+        -------
+        dict[str, float]
+            Dictionary mapping cell notation to the sum of live combo weights.
+        """
+        cell_weights: dict[str, float] = {}
+        for combo in self.keys():
+            cell = combo_to_cell(combo)
+            cell_weights[cell] = cell_weights.get(cell, 0.0) + self._range.get_weight(combo)
+        return cell_weights
 
     def by_cell_counts(self) -> dict[str, int]:
         """Count the number of live combos present in each 169-grid cell.

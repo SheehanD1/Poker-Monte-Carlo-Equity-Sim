@@ -73,6 +73,7 @@ from poker_equity.range import (
     generate_suited_combos,
     generate_unpaired_combos,
     parse_range_string,
+    parse_weighted_range_string,
 )
 
 # -- Simulation & Equities --------------------------------------------------
@@ -127,6 +128,7 @@ __all__ = [
     "generate_suited_combos",
     "generate_unpaired_combos",
     "parse_range_string",
+    "parse_weighted_range_string",
     # Simulation & Equities
     "EquityResult",
     "ProgressCallback",

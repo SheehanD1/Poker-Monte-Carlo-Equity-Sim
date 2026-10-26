@@ -12,6 +12,7 @@ from __future__ import annotations
 import collections
 import itertools
 import random
+import re
 from typing import Final, Iterable, Iterator, Mapping, Sequence, TypeAlias
 
 from poker_equity.card import Card, Rank, Suit
@@ -346,8 +347,12 @@ def _tokenize_range_string(range_str: str) -> list[str]:
     except ValueError:
         pass
 
+    # Normalize whitespace around weight delimiters so tokens like "AKs : 0.5" stay intact
+    norm = re.sub(r"\s*([:@])\s*", r"\1", range_str)
+    norm = re.sub(r"\[\s*(.*?)\s*\]", r"[\1]", norm)
+
     # Replace alternate delimiters with commas
-    text = range_str.replace(";", ",").replace("\n", ",")
+    text = norm.replace(";", ",").replace("\n", ",")
     comma_parts = [p.strip() for p in text.split(",") if p.strip()]
     tokens: list[str] = []
     for part in comma_parts:
@@ -362,6 +367,83 @@ def _tokenize_range_string(range_str: str) -> list[str]:
         else:
             tokens.extend(sub)
     return tokens
+
+
+def _extract_token_and_weight(token: str) -> tuple[str, float]:
+    """Separate a range token into its base hand specification and frequency weight.
+
+    Supports multiple poker frequency notations:
+    - Colon notation: ``"AKs:0.5"``, ``"AKs:50%"``, ``"AKs:50"``
+    - At notation: ``"AKs@0.5"``, ``"AKs@50%"``
+    - Bracket notation: ``"AKs[0.5]"``, ``"AKs[50%]"``
+
+    Tokens without explicit weights default to a weight of 1.0 (100%).
+
+    Parameters
+    ----------
+    token : str
+        Single range token (e.g. ``"AKs:0.5"``, ``"QQ+"``).
+
+    Returns
+    -------
+    tuple[str, float]
+        Tuple of ``(base_token, weight)`` where ``weight`` is a float in ``[0.0, 1.0]``.
+
+    Raises
+    ------
+    ValueError
+        If the weight string is malformed or out of range.
+    """
+    cleaned = token.strip()
+    if not cleaned:
+        return "", 1.0
+
+    base_token = cleaned
+    weight_str: str | None = None
+
+    if cleaned.endswith("]") and "[" in cleaned:
+        open_bracket = cleaned.rfind("[")
+        base_token = cleaned[:open_bracket].strip()
+        weight_str = cleaned[open_bracket + 1 : -1].strip()
+    elif "@" in cleaned:
+        parts = cleaned.split("@")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid weight syntax in token: {token!r}")
+        base_token = parts[0].strip()
+        weight_str = parts[1].strip()
+    elif ":" in cleaned:
+        parts = cleaned.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid weight syntax in token: {token!r}")
+        base_token = parts[0].strip()
+        weight_str = parts[1].strip()
+
+    if weight_str is None:
+        return base_token, 1.0
+
+    is_percent = False
+    if weight_str.endswith("%"):
+        is_percent = True
+        weight_str = weight_str[:-1].strip()
+
+    try:
+        val = float(weight_str)
+    except ValueError:
+        raise ValueError(f"Invalid weight value in token {token!r}: {weight_str!r}") from None
+
+    if is_percent:
+        if not (0.0 <= val <= 100.0):
+            raise ValueError(f"Weight percentage must be between 0% and 100%, got {val}%")
+        weight = val / 100.0
+    else:
+        if val < 0.0 or val > 100.0:
+            raise ValueError(f"Weight must be between 0.0 and 1.0 (or 0 and 100), got {val}")
+        if val > 1.0:
+            weight = val / 100.0
+        else:
+            weight = val
+
+    return base_token, weight
 
 
 def _parse_dash_token(token: str) -> set[Combo]:
@@ -627,6 +709,52 @@ def _parse_token(token: str) -> set[Combo]:
     raise ValueError(msg)
 
 
+def parse_weighted_range_string(range_str: str) -> dict[Combo, float]:
+    """Parse a poker range string into a mapping of canonical combos to frequency weights.
+
+    Tokens may specify frequencies/weights using colon, at-sign, or bracket notation:
+    - ``"AKs:0.5"`` or ``"AKs:50%"`` or ``"AKs:50"``
+    - ``"QQ+@0.75"``
+    - ``"T9s-76s[0.25]"``
+    - ``"AhKd:0.5"``
+
+    Tokens without explicit weights default to a weight of 1.0.  Later tokens
+    in the range string overwrite earlier weights for the same combos.  A weight
+    of 0.0 removes previously added combos.
+
+    Parameters
+    ----------
+    range_str : str
+        Standard poker range syntax string with optional weights.
+
+    Returns
+    -------
+    dict[Combo, float]
+        Dictionary mapping each combo to its weight in (0.0, 1.0].
+
+    Raises
+    ------
+    ValueError
+        If any token or weight syntax is invalid.
+    """
+    tokens = _tokenize_range_string(range_str)
+    weights: dict[Combo, float] = {}
+    for token in tokens:
+        if not token.strip():
+            continue
+        base_token, weight = _extract_token_and_weight(token)
+        if not base_token:
+            continue
+        combos = _parse_token(base_token)
+        if weight <= 0.0:
+            for c in combos:
+                weights.pop(c, None)
+        else:
+            for c in combos:
+                weights[c] = weight
+    return weights
+
+
 def parse_range_string(range_str: str) -> set[Combo]:
     """Parse a standard poker range string into a set of canonical combos.
 
@@ -645,11 +773,7 @@ def parse_range_string(range_str: str) -> set[Combo]:
     ValueError
         If any token in *range_str* has invalid poker range syntax.
     """
-    tokens = _tokenize_range_string(range_str)
-    combos: set[Combo] = set()
-    for token in tokens:
-        combos.update(_parse_token(token))
-    return combos
+    return set(parse_weighted_range_string(range_str).keys())
 
 
 # =========================================================================
@@ -817,48 +941,130 @@ class Range:
     True
     """
 
-    __slots__ = ("_combos", "_combos_list")
+    __slots__ = (
+        "_combos",
+        "_combos_list",
+        "_weights",
+        "_weights_list",
+        "_is_weighted",
+    )
 
     def __init__(
         self,
-        combos: Iterable[tuple[Card, Card] | Sequence[Card]] | None = None,
+        combos: (
+            Iterable[tuple[Card, Card] | Sequence[Card]]
+            | Mapping[Combo, float]
+            | None
+        ) = None,
+        weights: Mapping[Combo, float] | Sequence[float] | None = None,
     ) -> None:
-        """Initialize a Range with an optional collection of combos.
+        """Initialize a Range with an optional collection of combos and weights.
 
         Parameters
         ----------
-        combos : Iterable[tuple[Card, Card] | Sequence[Card]] | None
-            A collection of 2-card combos, or ``None`` to create an empty range.
+        combos : Iterable[tuple[Card, Card] | Sequence[Card]] | Mapping[Combo, float] | None
+            A collection of 2-card combos, a mapping from combos to weights in (0.0, 1.0],
+            or ``None`` to create an empty range.
+        weights : Mapping[Combo, float] | Sequence[float] | None, optional
+            Explicit weights for combos if not provided via a mapping.
 
         Raises
         ------
         ValueError
-            If any combo does not contain exactly two cards, or contains
-            identical cards.
+            If any combo does not contain exactly two cards, contains identical cards,
+            or if any weight is outside [0.0, 1.0].
         TypeError
             If any combo elements are not :class:`Card` instances.
         """
         if combos is None:
-            self._combos: frozenset[Combo] = frozenset()
+            self._combos = frozenset()
+            self._weights = {}
+            self._is_weighted = False
         elif isinstance(combos, Range):
             self._combos = combos._combos
+            self._weights = dict(combos._weights)
+            self._is_weighted = combos._is_weighted
+            if weights is not None:
+                self._apply_weights(weights)
+        elif isinstance(combos, collections.abc.Mapping):
+            validated_weights: dict[Combo, float] = {}
+            validated_combos: set[Combo] = set()
+            for item, wt in combos.items():
+                c = self._validate_combo(item)
+                w = float(wt)
+                if not (0.0 <= w <= 1.0):
+                    raise ValueError(f"Weight must be in [0.0, 1.0], got {w} for combo {c}")
+                if w > 0.0:
+                    validated_combos.add(c)
+                    validated_weights[c] = w
+            self._combos = frozenset(validated_combos)
+            self._weights = validated_weights
+            self._is_weighted = any(w < 1.0 for w in self._weights.values())
         else:
             validated: set[Combo] = set()
             for item in combos:
-                if not isinstance(item, (tuple, list)) or len(item) != 2:
-                    msg = f"Each combo must be a 2-card sequence, got: {item!r}"
-                    raise ValueError(msg)
-                c1, c2 = item[0], item[1]
-                if not isinstance(c1, Card) or not isinstance(c2, Card):
-                    msg = (
-                        f"Combo elements must be Card instances, got: "
-                        f"{type(c1).__name__}, {type(c2).__name__}"
-                    )
-                    raise TypeError(msg)
-                validated.add(canonical_combo(c1, c2))
+                validated.add(self._validate_combo(item))
             self._combos = frozenset(validated)
+            self._weights = {c: 1.0 for c in validated}
+            self._is_weighted = False
+            if weights is not None:
+                self._apply_weights(weights)
 
         self._combos_list: tuple[Combo, ...] | None = None
+        self._weights_list: tuple[float, ...] | None = None
+
+    @staticmethod
+    def _validate_combo(item: object) -> Combo:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            msg = f"Each combo must be a 2-card sequence, got: {item!r}"
+            raise ValueError(msg)
+        c1, c2 = item[0], item[1]
+        if not isinstance(c1, Card) or not isinstance(c2, Card):
+            msg = (
+                f"Combo elements must be Card instances, got: "
+                f"{type(c1).__name__}, {type(c2).__name__}"
+            )
+            raise TypeError(msg)
+        return canonical_combo(c1, c2)
+
+    def _apply_weights(
+        self, weights: Mapping[Combo, float] | Sequence[float]
+    ) -> None:
+        if isinstance(weights, collections.abc.Mapping):
+            new_weights: dict[Combo, float] = {}
+            new_combos: set[Combo] = set()
+            for c in self._combos:
+                w = float(weights.get(c, self._weights.get(c, 1.0)))
+                if not (0.0 <= w <= 1.0):
+                    raise ValueError(f"Weight must be in [0.0, 1.0], got {w}")
+                if w > 0.0:
+                    new_combos.add(c)
+                    new_weights[c] = w
+            self._combos = frozenset(new_combos)
+            self._weights = new_weights
+        elif isinstance(weights, collections.abc.Sequence):
+            combos_ordered = sorted(self._combos, reverse=True)
+            if len(weights) != len(combos_ordered):
+                raise ValueError(
+                    f"Length of weights sequence ({len(weights)}) does not match "
+                    f"number of combos ({len(combos_ordered)})"
+                )
+            new_weights = {}
+            new_combos = set()
+            for c, wt in zip(combos_ordered, weights):
+                w = float(wt)
+                if not (0.0 <= w <= 1.0):
+                    raise ValueError(f"Weight must be in [0.0, 1.0], got {w}")
+                if w > 0.0:
+                    new_combos.add(c)
+                    new_weights[c] = w
+            self._combos = frozenset(new_combos)
+            self._weights = new_weights
+        else:
+            raise TypeError(f"weights must be a Mapping or Sequence, got {type(weights).__name__}")
+        self._is_weighted = any(w < 1.0 for w in self._weights.values())
+        self._combos_list = None
+        self._weights_list = None
 
     # -- Properties --------------------------------------------------------
 
@@ -875,6 +1081,54 @@ class Range:
         return self._combos_list
 
     @property
+    def weights(self) -> dict[Combo, float]:
+        """Mapping of each combo in the range to its frequency weight in (0.0, 1.0]."""
+        return dict(self._weights)
+
+    @property
+    def is_weighted(self) -> bool:
+        """True if any combo in this range has a frequency weight < 1.0."""
+        return self._is_weighted
+
+    @property
+    def total_combos(self) -> float:
+        """The total effective number of combos, summing all combo weights.
+
+        For unweighted ranges, this equals ``len(self)``.
+        For weighted ranges, this is the sum of combo frequency weights.
+        """
+        return sum(self._weights.values())
+
+    @property
+    def weights_list(self) -> tuple[float, ...]:
+        """Tuple of weights corresponding to combos in combos_list."""
+        if self._weights_list is None:
+            self._weights_list = tuple(self._weights[c] for c in self.combos_list)
+        return self._weights_list
+
+    def get_weight(self, combo: Combo | str) -> float:
+        """Return the frequency weight of a combo in this range.
+
+        Parameters
+        ----------
+        combo : Combo | str
+            A canonical combo tuple or 4-character string (e.g. ``"AhKd"``).
+
+        Returns
+        -------
+        float
+            Weight in [0.0, 1.0], or 0.0 if the combo is not in the range.
+        """
+        if isinstance(combo, str):
+            try:
+                c = combo_from_str(combo)
+            except (ValueError, TypeError):
+                return 0.0
+        else:
+            c = combo
+        return self._weights.get(c, 0.0)
+
+    @property
     def is_empty(self) -> bool:
         """True if the range contains zero combos."""
         return len(self._combos) == 0
@@ -888,17 +1142,18 @@ class Range:
         Supports pocket pairs (``"QQ+"``, ``"88-66"``), suited hands (``"AKs"``,
         ``"T9s-76s"``, ``"A2s+"``), offsuit hands (``"AKo"``, ``"AQo+"``),
         unpaired hands (``"AK"``, ``"AQ+"``), specific combos (``"AhKd"``),
+        weighted tokens (``"AKs:0.5"``, ``"QQ+:0.75"``, ``"AKo:50%"``),
         and special keywords (``"random"``, ``"100%"``).
 
         Parameters
         ----------
         range_str : str
-            A poker range string, e.g. ``"AKs, QQ+, T9s-76s"`` or ``"AA, KK, AK"``.
+            A poker range string, e.g. ``"AKs:0.5, QQ+, T9s-76s"`` or ``"AA, KK, AK"``.
 
         Returns
         -------
         Range
-            A new Range containing all parsed combos.
+            A new Range containing all parsed combos with their weights.
 
         Raises
         ------
@@ -911,8 +1166,67 @@ class Range:
         >>> len(r)
         38
         """
-        combos = parse_range_string(range_str)
-        return cls(combos)
+        weighted_combos = parse_weighted_range_string(range_str)
+        return cls(weighted_combos)
+
+    @classmethod
+    def from_weighted_matrix(
+        cls,
+        matrix: Mapping[str, float],
+    ) -> Range:
+        """Construct a weighted Range from a 13x13 grid mapping of hand weights.
+
+        Unlike :meth:`from_matrix` (which selects a discrete integer count of
+        combos), ``from_weighted_matrix`` assigns the continuous float weight
+        directly to every combo in that hand cell.
+
+        Parameters
+        ----------
+        matrix : Mapping[str, float]
+            Mapping of hand cell labels (e.g. ``"AA"``, ``"AKs"``, ``"AKo"``)
+            to weights in ``[0.0, 1.0]``.
+
+        Returns
+        -------
+        Range
+            A weighted Range instance.
+
+        Raises
+        ------
+        ValueError
+            If any cell name is invalid or weight is out of range.
+        """
+        combo_weights: dict[Combo, float] = {}
+        for cell_raw, weight in matrix.items():
+            if weight <= 0.0:
+                continue
+            if weight > 1.0:
+                if weight <= 100.0:
+                    weight = weight / 100.0
+                else:
+                    raise ValueError(f"Weight must be in [0.0, 1.0], got {weight}")
+
+            normalized = _normalize_cell_name(cell_raw)
+
+            # Support unsuited shorthand (e.g. "AK": 0.5 -> AKs + AKo)
+            if len(normalized) == 2 and normalized[0] != normalized[1]:
+                r1 = Rank.from_char(normalized[0])
+                r2 = Rank.from_char(normalized[1])
+                high, low = (r1, r2) if r1 >= r2 else (r2, r1)
+                for c in CELL_COMBOS[f"{high.char}{low.char}s"]:
+                    combo_weights[c] = float(weight)
+                for c in CELL_COMBOS[f"{high.char}{low.char}o"]:
+                    combo_weights[c] = float(weight)
+                continue
+
+            if normalized not in CELL_COMBOS:
+                msg = f"Invalid hand matrix cell: {cell_raw!r}"
+                raise ValueError(msg)
+
+            for c in CELL_COMBOS[normalized]:
+                combo_weights[c] = float(weight)
+
+        return cls(combo_weights)
 
     @classmethod
     def from_matrix(
@@ -1129,16 +1443,22 @@ class Range:
         Range
             The merged Range.
         """
-        merged = set(self._combos)
+        merged = dict(self._weights)
         for other in others:
             if not isinstance(other, Range):
                 msg = f"Expected Range instance, got {type(other).__name__}"
                 raise TypeError(msg)
-            merged.update(other._combos)
+            for c, w in other._weights.items():
+                if c in merged:
+                    merged[c] = max(merged[c], w)
+                else:
+                    merged[c] = w
         return Range(merged)
 
     def intersection(self, *others: Range) -> Range:
         """Return a new Range with combos present in this range and all of *others*.
+
+        If a combo exists in multiple ranges, the minimum weight is retained.
 
         Parameters
         ----------
@@ -1150,12 +1470,16 @@ class Range:
         Range
             The intersection Range.
         """
-        res = set(self._combos)
+        res = dict(self._weights)
         for other in others:
             if not isinstance(other, Range):
                 msg = f"Expected Range instance, got {type(other).__name__}"
                 raise TypeError(msg)
-            res.intersection_update(other._combos)
+            res = {
+                c: min(res[c], other._weights[c])
+                for c in res
+                if c in other._weights
+            }
         return Range(res)
 
     def difference(self, *others: Range) -> Range:
@@ -1171,12 +1495,13 @@ class Range:
         Range
             The difference Range.
         """
-        res = set(self._combos)
+        res = dict(self._weights)
         for other in others:
             if not isinstance(other, Range):
                 msg = f"Expected Range instance, got {type(other).__name__}"
                 raise TypeError(msg)
-            res.difference_update(other._combos)
+            for c in other._combos:
+                res.pop(c, None)
         return Range(res)
 
     def symmetric_difference(self, other: Range) -> Range:
@@ -1195,7 +1520,14 @@ class Range:
         if not isinstance(other, Range):
             msg = f"Expected Range instance, got {type(other).__name__}"
             raise TypeError(msg)
-        return Range(self._combos ^ other._combos)
+        new_weights: dict[Combo, float] = {}
+        for c, w in self._weights.items():
+            if c not in other._combos:
+                new_weights[c] = w
+        for c, w in other._weights.items():
+            if c not in self._combos:
+                new_weights[c] = w
+        return Range(new_weights)
 
     def __or__(self, other: Range) -> Range:
         if not isinstance(other, Range):
@@ -1254,25 +1586,34 @@ class Range:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Range):
             return NotImplemented
-        return self._combos == other._combos
+        return self._combos == other._combos and self._weights == other._weights
 
     def __hash__(self) -> int:
-        return hash(self._combos)
+        if not self._is_weighted:
+            return hash(self._combos)
+        return hash((self._combos, tuple(sorted(self._weights.items()))))
 
     def __repr__(self) -> str:
         count = len(self._combos)
         combo_word = "combo" if count == 1 else "combos"
+        if self._is_weighted:
+            return f"Range({count} {combo_word}, {self.total_combos:.2f} weighted)"
         return f"Range({count} {combo_word})"
 
     def __str__(self) -> str:
         count = len(self._combos)
         combo_word = "combo" if count == 1 else "combos"
+        if self._is_weighted:
+            return f"Range({count} {combo_word}, {self.total_combos:.2f} weighted)"
         return f"Range({count} {combo_word})"
 
     # -- Sampling & Card Queries ------------------------------------------
 
     def sample(self, rng: random.Random | None = None) -> Combo:
-        """Randomly select one combo uniformly from the range.
+        """Randomly select one combo from the range.
+
+        If the range is weighted, combos are sampled with probability proportional
+        to their weights.  If unweighted, combos are sampled uniformly.
 
         Parameters
         ----------
@@ -1292,9 +1633,14 @@ class Range:
         """
         if not self._combos:
             raise ValueError("Cannot sample from an empty Range")
+        if not self._is_weighted:
+            if rng is not None:
+                return rng.choice(self.combos_list)
+            return random.choice(self.combos_list)
+
         if rng is not None:
-            return rng.choice(self.combos_list)
-        return random.choice(self.combos_list)
+            return rng.choices(self.combos_list, weights=self.weights_list, k=1)[0]
+        return random.choices(self.combos_list, weights=self.weights_list, k=1)[0]
 
     def contains_card(self, card: Card | str) -> bool:
         """Check if any combo in the range contains the specified card.
@@ -1335,7 +1681,8 @@ class Range:
         In poker simulation and equity analysis, cards that are already known
         (such as hero's hole cards or community cards on the board) cannot
         appear in villain's range.  This method returns a new :class:`Range`
-        containing only the combos that remain physically possible.
+        containing only the combos that remain physically possible, preserving
+        their frequency weights.
 
         Parameters
         ----------
@@ -1362,10 +1709,12 @@ class Range:
         dead = _coerce_dead_cards(dead_cards)
         if not dead or not self._combos:
             return self
-        return Range(
-            combo for combo in self._combos
+        live_weights = {
+            combo: weight
+            for combo, weight in self._weights.items()
             if combo[0] not in dead and combo[1] not in dead
-        )
+        }
+        return Range(live_weights)
 
     def blocked_combos(
         self,
@@ -1419,7 +1768,8 @@ class Range:
 
         Each key is a standard poker hand label (e.g. ``"AA"``, ``"AKs"``, ``"AKo"``),
         and each value is a float in ``[0.0, 1.0]`` representing the fraction of
-        possible combos for that hand that are included in this range.
+        possible combos for that hand that are included in this range, accounting
+        for partial combo weights.
 
         Parameters
         ----------
@@ -1441,16 +1791,16 @@ class Range:
         >>> m["AKs"]
         1.0
         """
-        counts: dict[str, int] = collections.defaultdict(int)
-        for combo in self._combos:
-            counts[combo_to_cell(combo)] += 1
+        weight_sums: dict[str, float] = collections.defaultdict(float)
+        for combo, w in self._weights.items():
+            weight_sums[combo_to_cell(combo)] += w
 
         matrix: dict[str, float] = {}
         for cell in HAND_GRID_CELLS:
             total_possible = len(CELL_COMBOS[cell])
-            cnt = counts.get(cell, 0)
-            if cnt > 0:
-                matrix[cell] = cnt / total_possible
+            w_sum = weight_sums.get(cell, 0.0)
+            if w_sum > 0.0:
+                matrix[cell] = w_sum / total_possible
             elif include_zeros:
                 matrix[cell] = 0.0
 
