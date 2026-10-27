@@ -94,6 +94,25 @@ from poker_equity.breakdown import (
     range_vs_hand_breakdown,
 )
 
+# -- Presets ----------------------------------------------------------------
+from poker_equity.presets import (
+    Position,
+    PRESET_DESCRIPTIONS,
+    PRESET_RANGES,
+    TOP_5_PERCENT,
+    TOP_10_PERCENT,
+    TOP_15_PERCENT,
+    TOP_20_PERCENT,
+    TOP_25_PERCENT,
+    TOP_30_PERCENT,
+    TOP_40_PERCENT,
+    TOP_50_PERCENT,
+    get_preset_description,
+    get_preset_range,
+    list_presets,
+    top_percent_range,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -141,6 +160,22 @@ __all__ = [
     "hand_vs_range_breakdown",
     "range_breakdown",
     "range_vs_hand_breakdown",
+    # Presets
+    "Position",
+    "PRESET_RANGES",
+    "PRESET_DESCRIPTIONS",
+    "TOP_5_PERCENT",
+    "TOP_10_PERCENT",
+    "TOP_15_PERCENT",
+    "TOP_20_PERCENT",
+    "TOP_25_PERCENT",
+    "TOP_30_PERCENT",
+    "TOP_40_PERCENT",
+    "TOP_50_PERCENT",
+    "get_preset_range",
+    "list_presets",
+    "get_preset_description",
+    "top_percent_range",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",

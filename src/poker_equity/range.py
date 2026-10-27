@@ -1170,6 +1170,31 @@ class Range:
         return cls(weighted_combos)
 
     @classmethod
+    def from_preset(cls, name: object) -> Range:
+        """Create a Range instance from a predefined position or archetype preset.
+
+        Parameters
+        ----------
+        name : str | Position
+            Preset name or Position enum (e.g. ``"UTG"``, ``"BTN"``, ``"CO"``,
+            ``"3BET_BTN"``, ``"top10"``).
+
+        Returns
+        -------
+        Range
+            The corresponding predefined Range instance.
+
+        Examples
+        --------
+        >>> r = Range.from_preset("BTN")
+        >>> len(r) > 500
+        True
+        """
+        from poker_equity.presets import get_preset_range
+
+        return get_preset_range(name)  # type: ignore[arg-type]
+
+    @classmethod
     def from_weighted_matrix(
         cls,
         matrix: Mapping[str, float],
