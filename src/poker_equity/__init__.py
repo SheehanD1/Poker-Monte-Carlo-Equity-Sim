@@ -113,6 +113,13 @@ from poker_equity.presets import (
     top_percent_range,
 )
 
+# -- Pot Odds & Decision Math ----------------------------------------------
+from poker_equity.odds import (
+    is_profitable_call,
+    pot_odds,
+    pot_odds_ratio,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -176,6 +183,10 @@ __all__ = [
     "list_presets",
     "get_preset_description",
     "top_percent_range",
+    # Pot Odds & Decision Math
+    "pot_odds",
+    "pot_odds_ratio",
+    "is_profitable_call",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
