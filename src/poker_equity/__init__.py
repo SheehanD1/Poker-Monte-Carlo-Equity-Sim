@@ -115,6 +115,10 @@ from poker_equity.presets import (
 
 # -- Pot Odds & Decision Math ----------------------------------------------
 from poker_equity.odds import (
+    ev_bet,
+    ev_call,
+    ev_fold,
+    expected_value,
     is_profitable_call,
     pot_odds,
     pot_odds_ratio,
@@ -187,6 +191,10 @@ __all__ = [
     "pot_odds",
     "pot_odds_ratio",
     "is_profitable_call",
+    "expected_value",
+    "ev_call",
+    "ev_fold",
+    "ev_bet",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
