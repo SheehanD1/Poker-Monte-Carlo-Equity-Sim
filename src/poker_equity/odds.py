@@ -361,3 +361,281 @@ def ev_bet(
     return (fold_equity * pot_size) + ((1.0 - fold_equity) * ev_when_called)
 
 
+def implied_odds(
+    pot_size: float,
+    bet_to_call: float,
+    future_bets: float = 0.0,
+) -> float:
+    """Calculate the required break-even equity including anticipated future bets.
+
+    Implied odds extend basic pot odds by factoring in additional chips that
+    Hero expects to win on subsequent betting rounds if Hero hits their draw.
+    This reduces the break-even equity required to make the call profitable now.
+
+    The formula is:
+
+    .. math::
+        \\text{required\\_equity} = \\frac{\\text{bet\\_to\\_call}}{\\text{pot\\_size} + \\text{bet\\_to\\_call} + \\text{future\\_bets}}
+
+    Parameters
+    ----------
+    pot_size : float
+        The total amount of chips currently in the pot facing the player.
+    bet_to_call : float
+        The additional amount of chips the player must wager to call.
+    future_bets : float, default=0.0
+        The additional chips Hero expects to win on future betting rounds if
+        their draw completes.
+
+    Returns
+    -------
+    float
+        The required break-even equity as a fraction between 0.0 and 1.0.
+        Returns 0.0 if ``bet_to_call`` is 0.
+
+    Raises
+    ------
+    ValueError
+        If ``pot_size < 0``, ``bet_to_call < 0``, or ``future_bets < 0``.
+    TypeError
+        If any argument is not numeric.
+
+    Examples
+    --------
+    Facing a $50 bet into a $150 pot with direct pot odds of 25%:
+
+    >>> from poker_equity.odds import implied_odds
+    >>> implied_odds(pot_size=150.0, bet_to_call=50.0, future_bets=0.0)
+    0.25
+
+    With an expected $100 won on the river if the draw hits:
+
+    >>> implied_odds(pot_size=150.0, bet_to_call=50.0, future_bets=100.0)
+    0.16666666666666666
+    """
+    if isinstance(pot_size, bool) or not isinstance(pot_size, (int, float)):
+        raise TypeError(f"pot_size must be a number, got {type(pot_size).__name__}")
+    if isinstance(bet_to_call, bool) or not isinstance(bet_to_call, (int, float)):
+        raise TypeError(f"bet_to_call must be a number, got {type(bet_to_call).__name__}")
+    if isinstance(future_bets, bool) or not isinstance(future_bets, (int, float)):
+        raise TypeError(f"future_bets must be a number, got {type(future_bets).__name__}")
+
+    if pot_size < 0:
+        raise ValueError(f"pot_size cannot be negative, got {pot_size}")
+    if bet_to_call < 0:
+        raise ValueError(f"bet_to_call cannot be negative, got {bet_to_call}")
+    if future_bets < 0:
+        raise ValueError(f"future_bets cannot be negative, got {future_bets}")
+
+    total_effective_pot = pot_size + bet_to_call + future_bets
+    if total_effective_pot == 0.0 or bet_to_call == 0.0:
+        return 0.0
+
+    return bet_to_call / total_effective_pot
+
+
+def required_implied_odds(
+    pot_size: float,
+    bet_to_call: float,
+    equity: float,
+) -> float:
+    """Calculate the additional future chips needed to make a call break-even.
+
+    When direct pot odds are insufficient to justify calling with a drawing
+    hand, this function determines the minimum amount of future bets Hero must
+    extract from opponents on later streets (when the draw hits) to achieve
+    EV >= 0.
+
+    The formula is derived from setting :math:`EV = 0`:
+
+    .. math::
+        \\text{equity} \\times (\\text{pot\\_size} + \\text{bet\\_to\\_call} + X) - \\text{bet\\_to\\_call} = 0
+        \\\\
+        X = \\frac{\\text{bet\\_to\\_call}}{\\text{equity}} - (\\text{pot\\_size} + \\text{bet\\_to\\_call})
+
+    If direct pot odds already make the call profitable (i.e. :math:`X \\le 0`),
+    this function returns ``0.0``.
+
+    Parameters
+    ----------
+    pot_size : float
+        The total amount of chips currently in the pot facing the player.
+    bet_to_call : float
+        The additional amount of chips the player must wager to call.
+    equity : float
+        Hero's equity (probability of winning) as a fraction between 0.0 and 1.0.
+
+    Returns
+    -------
+    float
+        The required future winnings in chips. Returns ``0.0`` if direct pot
+        odds are already sufficient. Returns ``float('inf')`` if ``equity == 0.0``
+        and ``bet_to_call > 0``.
+
+    Raises
+    ------
+    ValueError
+        If ``equity`` is not between 0.0 and 1.0, or if ``pot_size`` or
+        ``bet_to_call`` is negative.
+    TypeError
+        If any argument is not numeric.
+
+    Examples
+    --------
+    Facing a $50 bet into $150 pot (pot odds = 25%) with only 16.67% equity:
+
+    >>> from poker_equity.odds import required_implied_odds
+    >>> required_implied_odds(pot_size=150.0, bet_to_call=50.0, equity=1/6)
+    100.0
+
+    When Hero already has sufficient direct equity (30% equity facing 25% requirement):
+
+    >>> required_implied_odds(pot_size=150.0, bet_to_call=50.0, equity=0.30)
+    0.0
+    """
+    if isinstance(equity, bool) or not isinstance(equity, (int, float)):
+        raise TypeError(f"equity must be a number, got {type(equity).__name__}")
+    if isinstance(pot_size, bool) or not isinstance(pot_size, (int, float)):
+        raise TypeError(f"pot_size must be a number, got {type(pot_size).__name__}")
+    if isinstance(bet_to_call, bool) or not isinstance(bet_to_call, (int, float)):
+        raise TypeError(f"bet_to_call must be a number, got {type(bet_to_call).__name__}")
+
+    if not (0.0 <= equity <= 1.0):
+        raise ValueError(f"equity must be between 0.0 and 1.0, got {equity}")
+    if pot_size < 0:
+        raise ValueError(f"pot_size cannot be negative, got {pot_size}")
+    if bet_to_call < 0:
+        raise ValueError(f"bet_to_call cannot be negative, got {bet_to_call}")
+
+    if bet_to_call == 0.0:
+        return 0.0
+    if equity == 0.0:
+        return float("inf")
+
+    needed = (bet_to_call / equity) - (pot_size + bet_to_call)
+    return max(0.0, needed)
+
+
+def implied_odds_ratio(
+    pot_size: float,
+    bet_to_call: float,
+    future_bets: float = 0.0,
+) -> tuple[float, float]:
+    """Calculate implied odds expressed as a ratio (e.g. (5.0, 1.0) for 5:1).
+
+    Parameters
+    ----------
+    pot_size : float
+        The total amount of chips currently in the pot facing the player.
+    bet_to_call : float
+        The additional amount of chips the player must wager to call.
+    future_bets : float, default=0.0
+        The additional chips Hero expects to win on future betting rounds.
+
+    Returns
+    -------
+    tuple[float, float]
+        A 2-tuple ``(ratio, 1.0)`` representing ``ratio:1``.
+        If ``bet_to_call`` is 0, returns ``(float('inf'), 1.0)``.
+
+    Raises
+    ------
+    ValueError
+        If ``pot_size < 0``, ``bet_to_call < 0``, or ``future_bets < 0``.
+    TypeError
+        If any argument is not numeric.
+
+    Examples
+    --------
+    >>> from poker_equity.odds import implied_odds_ratio
+    >>> implied_odds_ratio(pot_size=150.0, bet_to_call=50.0, future_bets=100.0)
+    (5.0, 1.0)
+    """
+    if isinstance(pot_size, bool) or not isinstance(pot_size, (int, float)):
+        raise TypeError(f"pot_size must be a number, got {type(pot_size).__name__}")
+    if isinstance(bet_to_call, bool) or not isinstance(bet_to_call, (int, float)):
+        raise TypeError(f"bet_to_call must be a number, got {type(bet_to_call).__name__}")
+    if isinstance(future_bets, bool) or not isinstance(future_bets, (int, float)):
+        raise TypeError(f"future_bets must be a number, got {type(future_bets).__name__}")
+
+    if pot_size < 0:
+        raise ValueError(f"pot_size cannot be negative, got {pot_size}")
+    if bet_to_call < 0:
+        raise ValueError(f"bet_to_call cannot be negative, got {bet_to_call}")
+    if future_bets < 0:
+        raise ValueError(f"future_bets cannot be negative, got {future_bets}")
+
+    if bet_to_call == 0.0:
+        return (float("inf"), 1.0)
+
+    return ((pot_size + future_bets) / bet_to_call, 1.0)
+
+
+def reverse_implied_odds(
+    pot_size: float,
+    bet_to_call: float,
+    future_losses: float = 0.0,
+) -> float:
+    """Calculate the required break-even equity when facing future losses.
+
+    Reverse implied odds occur when Hero has a vulnerable or dominated draw
+    (e.g., small flush or low straight) where making the hand risks losing
+    additional chips to a higher hand on later streets.
+
+    The formula is:
+
+    .. math::
+        \\text{required\\_equity} = \\frac{\\text{bet\\_to\\_call} + \\text{future\\_losses}}{\\text{pot\\_size} + \\text{bet\\_to\\_call} + \\text{future\\_losses}}
+
+    Parameters
+    ----------
+    pot_size : float
+        The total amount of chips currently in the pot facing the player.
+    bet_to_call : float
+        The additional amount of chips the player must wager to call.
+    future_losses : float, default=0.0
+        The additional chips Hero expects to lose on subsequent streets if
+        outdrawn or dominated.
+
+    Returns
+    -------
+    float
+        The required break-even equity as a fraction between 0.0 and 1.0.
+
+    Raises
+    ------
+    ValueError
+        If ``pot_size < 0``, ``bet_to_call < 0``, or ``future_losses < 0``.
+    TypeError
+        If any argument is not numeric.
+
+    Examples
+    --------
+    Facing a $50 bet into $150 pot with potential $50 future loss if dominated:
+
+    >>> from poker_equity.odds import reverse_implied_odds
+    >>> reverse_implied_odds(pot_size=150.0, bet_to_call=50.0, future_losses=50.0)
+    0.4
+    """
+    if isinstance(pot_size, bool) or not isinstance(pot_size, (int, float)):
+        raise TypeError(f"pot_size must be a number, got {type(pot_size).__name__}")
+    if isinstance(bet_to_call, bool) or not isinstance(bet_to_call, (int, float)):
+        raise TypeError(f"bet_to_call must be a number, got {type(bet_to_call).__name__}")
+    if isinstance(future_losses, bool) or not isinstance(future_losses, (int, float)):
+        raise TypeError(f"future_losses must be a number, got {type(future_losses).__name__}")
+
+    if pot_size < 0:
+        raise ValueError(f"pot_size cannot be negative, got {pot_size}")
+    if bet_to_call < 0:
+        raise ValueError(f"bet_to_call cannot be negative, got {bet_to_call}")
+    if future_losses < 0:
+        raise ValueError(f"future_losses cannot be negative, got {future_losses}")
+
+    total_effective_pot = pot_size + bet_to_call + future_losses
+    if total_effective_pot == 0.0 or (bet_to_call == 0.0 and future_losses == 0.0):
+        return 0.0
+
+    return (bet_to_call + future_losses) / total_effective_pot
+
+
+

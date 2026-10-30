@@ -119,9 +119,13 @@ from poker_equity.odds import (
     ev_call,
     ev_fold,
     expected_value,
+    implied_odds,
+    implied_odds_ratio,
     is_profitable_call,
     pot_odds,
     pot_odds_ratio,
+    required_implied_odds,
+    reverse_implied_odds,
 )
 
 __all__ = [
@@ -195,6 +199,10 @@ __all__ = [
     "ev_call",
     "ev_fold",
     "ev_bet",
+    "implied_odds",
+    "implied_odds_ratio",
+    "required_implied_odds",
+    "reverse_implied_odds",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",

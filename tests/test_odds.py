@@ -8,9 +8,13 @@ from poker_equity import (
     ev_call,
     ev_fold,
     expected_value,
+    implied_odds,
+    implied_odds_ratio,
     is_profitable_call,
     pot_odds,
     pot_odds_ratio,
+    required_implied_odds,
+    reverse_implied_odds,
 )
 
 
@@ -287,5 +291,171 @@ class TestEVBet:
             ev_bet(True, 100.0, 50.0)
         with pytest.raises(TypeError):
             ev_bet(0.5, 100.0, 50.0, fold_equity=False)
+
+
+class TestImpliedOdds:
+    """Tests for the implied_odds function."""
+
+    def test_implied_odds_zero_future_bets_equals_pot_odds(self):
+        """When future bets are 0, implied odds match pot odds."""
+        assert implied_odds(150.0, 50.0, 0.0) == pytest.approx(pot_odds(150.0, 50.0))
+        assert implied_odds(150.0, 50.0) == pytest.approx(0.25)
+
+    def test_implied_odds_with_future_bets(self):
+        """Future bets reduce the required break-even equity."""
+        # 50 to call into 150 pot + 100 future bets -> 50 / (150 + 50 + 100) = 50 / 300 = 1/6
+        assert implied_odds(150.0, 50.0, 100.0) == pytest.approx(1.0 / 6.0)
+
+    def test_implied_odds_zero_bet_to_call(self):
+        """Zero bet to call requires 0 equity."""
+        assert implied_odds(100.0, 0.0, 50.0) == 0.0
+        assert implied_odds(0.0, 0.0, 0.0) == 0.0
+
+    def test_implied_odds_negative_inputs_raise(self):
+        """Negative pot_size, bet_to_call, or future_bets raise ValueError."""
+        with pytest.raises(ValueError, match="pot_size cannot be negative"):
+            implied_odds(-10.0, 50.0, 50.0)
+        with pytest.raises(ValueError, match="bet_to_call cannot be negative"):
+            implied_odds(100.0, -10.0, 50.0)
+        with pytest.raises(ValueError, match="future_bets cannot be negative"):
+            implied_odds(100.0, 50.0, -10.0)
+
+    @pytest.mark.parametrize("invalid", ["50", None, [50], True, False])
+    def test_implied_odds_invalid_type_raises(self, invalid):
+        """Non-numeric or bool values raise TypeError."""
+        with pytest.raises(TypeError):
+            implied_odds(invalid, 50.0, 50.0)
+        with pytest.raises(TypeError):
+            implied_odds(100.0, invalid, 50.0)
+        with pytest.raises(TypeError):
+            implied_odds(100.0, 50.0, invalid)
+
+
+class TestRequiredImpliedOdds:
+    """Tests for the required_implied_odds function."""
+
+    def test_required_implied_odds_when_behind(self):
+        """When equity is below direct pot odds, calculates required future winnings."""
+        # Pot 150, call 50 (pot odds = 25%). Hero equity = 1/6 (~16.67%).
+        # Needed = 50 / (1/6) - 200 = 300 - 200 = 100.0
+        assert required_implied_odds(150.0, 50.0, 1.0 / 6.0) == pytest.approx(100.0)
+
+    def test_required_implied_odds_when_already_profitable(self):
+        """When direct equity exceeds pot odds, returns 0.0 additional chips."""
+        # Pot 150, call 50 (needs 25%). Hero equity = 30% -> profitable now.
+        assert required_implied_odds(150.0, 50.0, 0.30) == 0.0
+
+    def test_required_implied_odds_at_breakeven(self):
+        """When direct equity exactly equals pot odds, returns 0.0."""
+        assert required_implied_odds(150.0, 50.0, 0.25) == pytest.approx(0.0)
+
+    def test_required_implied_odds_zero_equity(self):
+        """Zero equity with positive bet to call returns inf (impossible to break even)."""
+        assert required_implied_odds(150.0, 50.0, 0.0) == float("inf")
+
+    def test_required_implied_odds_zero_bet_to_call(self):
+        """Zero bet to call costs nothing, requires 0 future winnings."""
+        assert required_implied_odds(150.0, 0.0, 0.10) == 0.0
+        assert required_implied_odds(150.0, 0.0, 0.0) == 0.0
+
+    def test_required_implied_odds_validation_errors(self):
+        """Negative amounts or out of bounds equity raise ValueError."""
+        with pytest.raises(ValueError, match="equity must be between 0.0 and 1.0"):
+            required_implied_odds(150.0, 50.0, -0.1)
+        with pytest.raises(ValueError, match="equity must be between 0.0 and 1.0"):
+            required_implied_odds(150.0, 50.0, 1.1)
+        with pytest.raises(ValueError, match="pot_size cannot be negative"):
+            required_implied_odds(-10.0, 50.0, 0.2)
+        with pytest.raises(ValueError, match="bet_to_call cannot be negative"):
+            required_implied_odds(100.0, -5.0, 0.2)
+
+    @pytest.mark.parametrize("invalid", ["0.2", None, [0.2], True, False])
+    def test_required_implied_odds_invalid_type_raises(self, invalid):
+        """Non-numeric or bool values raise TypeError."""
+        with pytest.raises(TypeError):
+            required_implied_odds(invalid, 50.0, 0.2)
+        with pytest.raises(TypeError):
+            required_implied_odds(100.0, invalid, 0.2)
+        with pytest.raises(TypeError):
+            required_implied_odds(100.0, 50.0, invalid)
+
+
+class TestImpliedOddsRatio:
+    """Tests for the implied_odds_ratio function."""
+
+    def test_implied_odds_ratio_standard(self):
+        """Pot of 150, call 50, future 100 gives 5:1 odds."""
+        ratio, base = implied_odds_ratio(150.0, 50.0, 100.0)
+        assert ratio == pytest.approx(5.0)
+        assert base == 1.0
+
+    def test_implied_odds_ratio_default_future_bets(self):
+        """Default future_bets is 0.0."""
+        ratio, base = implied_odds_ratio(150.0, 50.0)
+        assert ratio == pytest.approx(3.0)
+        assert base == 1.0
+
+    def test_implied_odds_ratio_zero_bet(self):
+        """Zero bet to call gives infinite odds."""
+        ratio, base = implied_odds_ratio(100.0, 0.0, 50.0)
+        assert math.isinf(ratio)
+        assert base == 1.0
+
+    def test_implied_odds_ratio_validation_errors(self):
+        """Negative inputs raise ValueError."""
+        with pytest.raises(ValueError):
+            implied_odds_ratio(-10.0, 50.0, 50.0)
+        with pytest.raises(ValueError):
+            implied_odds_ratio(100.0, -10.0, 50.0)
+        with pytest.raises(ValueError):
+            implied_odds_ratio(100.0, 50.0, -10.0)
+
+    def test_implied_odds_ratio_type_errors(self):
+        """Non-numeric or bool inputs raise TypeError."""
+        with pytest.raises(TypeError):
+            implied_odds_ratio("100", 50.0, 50.0)
+        with pytest.raises(TypeError):
+            implied_odds_ratio(100.0, True, 50.0)
+        with pytest.raises(TypeError):
+            implied_odds_ratio(100.0, 50.0, None)
+
+
+class TestReverseImpliedOdds:
+    """Tests for the reverse_implied_odds function."""
+
+    def test_reverse_implied_odds_zero_losses_equals_pot_odds(self):
+        """When future losses are 0, reverse implied odds match pot odds."""
+        assert reverse_implied_odds(150.0, 50.0, 0.0) == pytest.approx(pot_odds(150.0, 50.0))
+        assert reverse_implied_odds(150.0, 50.0) == pytest.approx(0.25)
+
+    def test_reverse_implied_odds_with_future_losses(self):
+        """Future losses increase the required break-even equity."""
+        # 50 call + 50 future loss = 100 / (150 + 50 + 50) = 100 / 250 = 0.40
+        assert reverse_implied_odds(150.0, 50.0, 50.0) == pytest.approx(0.40)
+
+    def test_reverse_implied_odds_zero_bet_and_loss(self):
+        """Zero bet and zero future losses requires 0 equity."""
+        assert reverse_implied_odds(100.0, 0.0, 0.0) == 0.0
+        assert reverse_implied_odds(0.0, 0.0, 0.0) == 0.0
+
+    def test_reverse_implied_odds_validation_errors(self):
+        """Negative inputs raise ValueError."""
+        with pytest.raises(ValueError, match="pot_size cannot be negative"):
+            reverse_implied_odds(-10.0, 50.0, 20.0)
+        with pytest.raises(ValueError, match="bet_to_call cannot be negative"):
+            reverse_implied_odds(100.0, -5.0, 20.0)
+        with pytest.raises(ValueError, match="future_losses cannot be negative"):
+            reverse_implied_odds(100.0, 50.0, -10.0)
+
+    @pytest.mark.parametrize("invalid", ["50", None, [50], True, False])
+    def test_reverse_implied_odds_type_errors(self, invalid):
+        """Non-numeric or bool inputs raise TypeError."""
+        with pytest.raises(TypeError):
+            reverse_implied_odds(invalid, 50.0, 20.0)
+        with pytest.raises(TypeError):
+            reverse_implied_odds(100.0, invalid, 20.0)
+        with pytest.raises(TypeError):
+            reverse_implied_odds(100.0, 50.0, invalid)
+
 
 
