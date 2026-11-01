@@ -128,6 +128,18 @@ from poker_equity.odds import (
     reverse_implied_odds,
 )
 
+# -- Outs & Drawing Odds ---------------------------------------------------
+from poker_equity.outs import (
+    OutsResult,
+    calculate_improvement_outs,
+    calculate_outs,
+    exact_river_equity,
+    exact_turn_equity,
+    outs_to_equity,
+    rule_of_2,
+    rule_of_4,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -203,6 +215,15 @@ __all__ = [
     "implied_odds_ratio",
     "required_implied_odds",
     "reverse_implied_odds",
+    # Outs & Drawing Odds
+    "rule_of_2",
+    "rule_of_4",
+    "exact_turn_equity",
+    "exact_river_equity",
+    "outs_to_equity",
+    "OutsResult",
+    "calculate_outs",
+    "calculate_improvement_outs",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
