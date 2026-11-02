@@ -458,4 +458,96 @@ class TestReverseImpliedOdds:
             reverse_implied_odds(100.0, 50.0, invalid)
 
 
+class TestOddsMathematicalProperties:
+    """Rigorous tests for mathematical theorems and properties of odds/EV."""
+
+    def test_pot_odds_ratio_reciprocal_identity(self):
+        """Ratio R:1 implies required equity is 1 / (R + 1)."""
+        for pot, bet in [(100.0, 50.0), (300.0, 100.0), (75.0, 25.0), (200.0, 200.0)]:
+            req_equity = pot_odds(pot, bet)
+            ratio, base = pot_odds_ratio(pot, bet)
+            assert base == 1.0
+            reconstructed_equity = 1.0 / (ratio + 1.0)
+            assert req_equity == pytest.approx(reconstructed_equity)
+
+    def test_pot_odds_monotonicity(self):
+        """Increasing pot decreases required equity; increasing bet increases it."""
+        base_pot, base_bet = 100.0, 50.0
+        base_req = pot_odds(base_pot, base_bet)
+
+        # Larger pot -> smaller required equity
+        assert pot_odds(base_pot + 50.0, base_bet) < base_req
+
+        # Larger bet -> larger required equity
+        assert pot_odds(base_pot, base_bet + 25.0) > base_req
+
+    def test_implied_odds_monotonicity(self):
+        """Increasing future bets strictly decreases required equity."""
+        pot, bet = 150.0, 50.0
+        assert implied_odds(pot, bet, 0.0) > implied_odds(pot, bet, 50.0)
+        assert implied_odds(pot, bet, 50.0) > implied_odds(pot, bet, 100.0)
+
+    def test_reverse_implied_odds_monotonicity(self):
+        """Increasing future losses strictly increases required equity."""
+        pot, bet = 150.0, 50.0
+        assert reverse_implied_odds(pot, bet, 0.0) < reverse_implied_odds(pot, bet, 50.0)
+        assert reverse_implied_odds(pot, bet, 50.0) < reverse_implied_odds(pot, bet, 100.0)
+
+    def test_expected_value_zero_at_pot_odds(self):
+        """At exactly break-even pot odds, EV is identically zero."""
+        for pot in [50.0, 100.0, 250.0, 1000.0]:
+            for bet in [10.0, 50.0, 100.0, 500.0]:
+                req_eq = pot_odds(pot, bet)
+                ev = expected_value(req_eq, pot, bet)
+                assert ev == pytest.approx(0.0, abs=1e-12)
+
+    def test_required_implied_odds_restores_zero_ev(self):
+        """Adding required_implied_odds to pot makes an underdog call break-even (EV=0)."""
+        pot, bet = 150.0, 50.0
+        underdog_equity = 0.15  # direct pot odds = 25%, so 15% is -EV
+
+        needed_chips = required_implied_odds(pot, bet, underdog_equity)
+        assert needed_chips > 0.0
+
+        # With needed_chips in effective pot, EV must be 0.0
+        effective_pot = pot + needed_chips
+        ev_with_future = expected_value(underdog_equity, effective_pot, bet)
+        assert ev_with_future == pytest.approx(0.0, abs=1e-10)
+
+    def test_ev_bet_boundary_conditions(self):
+        """ev_bet behaves consistently at 0% and 100% fold equity."""
+        pot, bet, equity = 100.0, 50.0, 0.60
+
+        # 100% fold equity always wins pot outright regardless of showdown equity
+        assert ev_bet(equity=0.0, pot_size=pot, bet_size=bet, fold_equity=1.0) == pytest.approx(pot)
+        assert ev_bet(equity=1.0, pot_size=pot, bet_size=bet, fold_equity=1.0) == pytest.approx(pot)
+
+        # 0% fold equity matches showdown EV with double bet added to pot
+        pot_if_called = pot + 2 * bet
+        expected_showdown_ev = (equity * pot_if_called) - bet
+        assert ev_bet(equity=equity, pot_size=pot, bet_size=bet, fold_equity=0.0) == pytest.approx(expected_showdown_ev)
+
+
+class TestExtremeStakesAndNumbers:
+    """Tests for extreme stakes and floating point stability."""
+
+    def test_micro_stakes_fractional_cents(self):
+        """Small blinds / fractions of a cent (e.g. online microstakes)."""
+        pot, bet = 0.05, 0.02
+        req = pot_odds(pot, bet)
+        assert req == pytest.approx(0.02 / 0.07)
+        assert expected_value(req, pot, bet) == pytest.approx(0.0, abs=1e-12)
+
+    def test_tournament_mega_stacks(self):
+        """Huge tournament chip counts (e.g. 50,000,000)."""
+        pot, bet = 50_000_000.0, 15_000_000.0
+        req = pot_odds(pot, bet)
+        assert req == pytest.approx(15.0 / 65.0)
+        assert expected_value(req, pot, bet) == pytest.approx(0.0, abs=1e-6)
+
+        ev_call_win = expected_value(1.0, pot, bet)
+        assert ev_call_win == pytest.approx(50_000_000.0)
+
+
+
 
