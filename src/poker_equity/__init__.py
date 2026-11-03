@@ -140,6 +140,16 @@ from poker_equity.outs import (
     rule_of_4,
 )
 
+# -- Decision Recommendation Engine ----------------------------------------
+from poker_equity.decision import (
+    Action,
+    DecisionEngine,
+    DecisionResult,
+    recommend_decision,
+    recommend_drawing_decision,
+    recommend_hand_decision,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -224,6 +234,13 @@ __all__ = [
     "OutsResult",
     "calculate_outs",
     "calculate_improvement_outs",
+    # Decision Recommendation Engine
+    "Action",
+    "DecisionResult",
+    "DecisionEngine",
+    "recommend_decision",
+    "recommend_hand_decision",
+    "recommend_drawing_decision",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
