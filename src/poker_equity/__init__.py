@@ -150,6 +150,14 @@ from poker_equity.decision import (
     recommend_hand_decision,
 )
 
+# -- All-In Equity & Run It Twice ------------------------------------------
+from poker_equity.all_in import (
+    RunItTimesResult,
+    exact_run_it_twice_turn,
+    simulate_run_it_n,
+    simulate_run_it_twice,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -241,6 +249,11 @@ __all__ = [
     "recommend_decision",
     "recommend_hand_decision",
     "recommend_drawing_decision",
+    # All-In Equity & Run It Twice
+    "RunItTimesResult",
+    "simulate_run_it_twice",
+    "simulate_run_it_n",
+    "exact_run_it_twice_turn",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
