@@ -303,10 +303,10 @@ def simulate_run_it_n(
             player_sim_payouts[p_idx].append(sim_payouts[p_idx])
 
         # Check for scoop vs split
-        # A player scoops if they are a winner on EVERY board
+        # A player scoops if they win 100% of the pot across all boards
         scooper = None
         for p_idx in range(num_players):
-            if all(p_idx in b_wins for b_wins in board_winners):
+            if abs(sim_payouts[p_idx] - 1.0) < 1e-9:
                 scooper = p_idx
                 player_scoop_counts[p_idx] += 1
                 break
