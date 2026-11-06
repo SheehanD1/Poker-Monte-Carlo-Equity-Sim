@@ -158,6 +158,18 @@ from poker_equity.all_in import (
     simulate_run_it_twice,
 )
 
+# -- Equity Curve over Streets ---------------------------------------------
+from poker_equity.equity_curve import (
+    EquityCurve,
+    NextStreetDistribution,
+    Street,
+    StreetPoint,
+    calculate_equity_curve,
+    calculate_next_street_distribution,
+    calculate_street_trajectory,
+    simulate_equity_curve,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -254,6 +266,15 @@ __all__ = [
     "simulate_run_it_twice",
     "simulate_run_it_n",
     "exact_run_it_twice_turn",
+    # Equity Curve over Streets
+    "Street",
+    "StreetPoint",
+    "EquityCurve",
+    "NextStreetDistribution",
+    "calculate_equity_curve",
+    "simulate_equity_curve",
+    "calculate_street_trajectory",
+    "calculate_next_street_distribution",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
