@@ -178,6 +178,18 @@ from poker_equity.game_state import (
     SidePot,
 )
 
+# -- CLI -------------------------------------------------------------------
+def cli_main(argv: Any = None) -> int:
+    """Run the poker-equity command-line interface."""
+    from poker_equity.cli import main
+    return main(argv)
+
+
+def create_parser() -> Any:
+    """Create the CLI argument parser."""
+    from poker_equity.cli import create_parser as _create_parser
+    return _create_parser()
+
 __all__ = [
     # Card primitives
     "Card",
@@ -288,6 +300,9 @@ __all__ = [
     "PlayerState",
     "SidePot",
     "ActionRecord",
+    # CLI
+    "create_parser",
+    "cli_main",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",

@@ -28,6 +28,9 @@ Homepage = "https://github.com/SheehanD1/Poker-Monte-Carlo-Equity-Sim"
 Repository = "https://github.com/SheehanD1/Poker-Monte-Carlo-Equity-Sim"
 Issues = "https://github.com/SheehanD1/Poker-Monte-Carlo-Equity-Sim/issues"
 
+[project.scripts]
+poker-equity = "poker_equity.cli:main"
+
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
