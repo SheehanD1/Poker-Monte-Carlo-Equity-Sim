@@ -170,6 +170,14 @@ from poker_equity.equity_curve import (
     simulate_equity_curve,
 )
 
+# -- Game State & Table Tracking -------------------------------------------
+from poker_equity.game_state import (
+    ActionRecord,
+    GameState,
+    PlayerState,
+    SidePot,
+)
+
 __all__ = [
     # Card primitives
     "Card",
@@ -275,6 +283,11 @@ __all__ = [
     "simulate_equity_curve",
     "calculate_street_trajectory",
     "calculate_next_street_distribution",
+    # Game State & Table Tracking
+    "GameState",
+    "PlayerState",
+    "SidePot",
+    "ActionRecord",
     # Constants
     "FULL_DECK",
     "FULL_DECK_LIST",
