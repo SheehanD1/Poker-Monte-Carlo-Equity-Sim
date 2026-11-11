@@ -24,11 +24,13 @@ def _worker(
     board: Sequence[Card] | None,
     num_sims: int,
     seed: int | None,
+    dead: Sequence[Card | str] | str | None = None,
 ) -> list[EquityResult]:
     """Worker function for parallel execution."""
     return calculate_equities(
         hands=hands,
         board=board,
+        dead=dead,
         num_sims=num_sims,
         seed=seed,
     )
@@ -38,6 +40,7 @@ def calculate_equities_parallel(
     hands: Sequence[Sequence[Card] | None],
     board: Sequence[Card] | None = None,
     *,
+    dead: Sequence[Card | str] | str | None = None,
     num_sims: int = 10_000,
     num_workers: int | None = None,
     seed: int | None = None,
@@ -52,6 +55,8 @@ def calculate_equities_parallel(
         List of hole cards for each player. Use ``None`` for random hands.
     board:
         Known community cards (0 to 5).
+    dead:
+        Dead / folded cards to exclude.
     num_sims:
         Total number of Monte Carlo simulations to run.
     num_workers:
@@ -68,7 +73,7 @@ def calculate_equities_parallel(
     if board is None:
         board = []
         
-    _validate_multi_inputs(hands, board)
+    _validate_multi_inputs(hands, board, dead)
 
     if num_sims <= 0:
         raise ValueError(f"num_sims must be positive, got {num_sims}")
@@ -81,7 +86,7 @@ def calculate_equities_parallel(
         
     # If the work is too small, just run synchronously
     if num_sims < num_workers:
-        return calculate_equities(hands, board, num_sims=num_sims, seed=seed)
+        return calculate_equities(hands, board, dead=dead, num_sims=num_sims, seed=seed)
         
     sims_per_worker = num_sims // num_workers
     remainder = num_sims % num_workers
@@ -90,7 +95,7 @@ def calculate_equities_parallel(
     for i in range(num_workers):
         worker_sims = sims_per_worker + (1 if i < remainder else 0)
         worker_seed = seed + i if seed is not None else None
-        tasks.append((hands, board, worker_sims, worker_seed))
+        tasks.append((hands, board, worker_sims, worker_seed, dead))
         
     # Run tasks in parallel
     with multiprocessing.Pool(processes=num_workers) as pool:
@@ -129,6 +134,7 @@ def calculate_equity_parallel(
     villain: Sequence[Card] | None = None,
     board: Sequence[Card] | None = None,
     *,
+    dead: Sequence[Card | str] | str | None = None,
     num_sims: int = 10_000,
     num_workers: int | None = None,
     seed: int | None = None,
@@ -141,6 +147,7 @@ def calculate_equity_parallel(
     results = calculate_equities_parallel(
         hands=[hero, villain],
         board=board,
+        dead=dead,
         num_sims=num_sims,
         num_workers=num_workers,
         seed=seed,

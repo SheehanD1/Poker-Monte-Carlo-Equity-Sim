@@ -15,6 +15,7 @@ from poker_equity.cli import (
     pad_visible,
     parse_cards_flexible,
     parse_player_hand_input,
+    parse_range_or_preset,
     should_enable_color,
     strip_ansi,
     visible_length,
@@ -168,6 +169,23 @@ class TestCliFormattingHelpers:
         board = [Card.from_str("As"), Card.from_str("Ks"), Card.from_str("2c")]
         assert "Two Pair" in get_hand_type_description((c_ah, c_kh), board)
 
+    def test_parse_range_or_preset(self):
+        """parse_range_or_preset handles hands, ranges, percentages, and presets."""
+        hand = parse_range_or_preset("AhKh")
+        assert isinstance(hand, tuple) and len(hand) == 2
+
+        r1 = parse_range_or_preset("QQ+, AKs")
+        assert len(r1) == 22
+
+        r2 = parse_range_or_preset("15%")
+        assert len(r2) > 0
+
+        r3 = parse_range_or_preset("BB_VS_BTN_3BET")
+        assert len(r3) > 0
+
+        with pytest.raises(ValueError):
+            parse_range_or_preset("")
+
 
 class TestCliEquityCommand:
     """Tests for 'equity' subcommand."""
@@ -274,6 +292,189 @@ class TestCliEquityCommand:
         assert code == 2
         captured = capsys.readouterr()
         assert "Error parsing board cards" in captured.err
+
+
+class TestCliRangeCommand:
+    """Tests for 'range' subcommand."""
+
+    def test_hand_vs_range_positional(self, capsys):
+        """Simulate hand vs range with positional syntax."""
+        code = main(["range", "AhKh", "TT+, AJs+, KQs", "-n", "500", "-s", "42"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range vs Range Equity Simulation" in captured.out
+        assert "Hero" in captured.out
+        assert "Villain" in captured.out
+        assert "TT+, AJs+, KQs" in captured.out
+
+    def test_range_vs_range_named(self, capsys):
+        """Simulate range vs range using --hero and --villain."""
+        code = main([
+            "range",
+            "--hero", "QQ+, AKs",
+            "--villain", "TT+, AJs+, KQs",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "QQ+, AKs" in captured.out
+        assert "TT+, AJs+, KQs" in captured.out
+
+    def test_range_with_board(self, capsys):
+        """Simulate range equity with flop board."""
+        code = main([
+            "range",
+            "AhKh",
+            "TT+, AJs+",
+            "-b", "As 7h 2c",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "A♠ 7♥ 2♣" in captured.out
+        assert "Hero" in captured.out
+
+    def test_range_with_dead_cards(self, capsys):
+        """Dead cards reduce live combos and appear in header."""
+        code = main([
+            "range",
+            "AhKh",
+            "TT+, AJs+",
+            "-d", "As Ks",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Dead" in captured.out
+        assert "A♠ K♠" in captured.out
+
+    def test_range_weighted_syntax(self, capsys):
+        """Weighted range tokens are handled and simulated."""
+        code = main([
+            "range",
+            "AA:0.8, KK:0.5",
+            "QQ+",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "AA:0.8, KK:0.5" in captured.out
+
+    def test_range_percentage_preset(self, capsys):
+        """Percentage range string (e.g. '20%') is expanded."""
+        code = main(["range", "AhKh", "20%", "-n", "500", "-s", "42"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Hero" in captured.out
+        assert "Villain" in captured.out
+
+    def test_range_named_preset(self, capsys):
+        """Named preset (e.g. 'BB_VS_BTN_3BET') is expanded."""
+        code = main(["range", "AhKh", "BB_VS_BTN_3BET", "-n", "500", "-s", "42"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "BB_VS_BTN_3BET" in captured.out
+
+    def test_range_combo_breakdown(self, capsys):
+        """--breakdown displays top combo equity rankings."""
+        code = main(["range", "AhKh", "TT+, AJs+", "-k", "5", "-n", "500", "-s", "42"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Top 5 Combos in Villain Range" in captured.out
+        assert "Cell" in captured.out
+
+    def test_range_json_output(self, capsys):
+        """--json output produces valid schema with hero and villain metadata."""
+        code = main(["range", "AhKh", "TT+, AJs+", "--json", "-n", "500", "-s", "42"])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "hero" in data
+        assert "villain" in data
+        assert data["hero"]["equity"] > 0
+        assert data["villain"]["is_range"] is True
+        assert data["villain"]["total_combos"] > 0
+
+    def test_range_json_with_breakdown(self, capsys):
+        """--json with --breakdown includes combo array."""
+        code = main([
+            "range",
+            "AhKh",
+            "TT+, AJs+",
+            "--json",
+            "-k", "3",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "breakdown" in data
+        assert len(data["breakdown"]) == 3
+        assert "combo" in data["breakdown"][0]
+        assert "cell" in data["breakdown"][0]
+        assert "equity" in data["breakdown"][0]
+
+    def test_range_convergence_threshold(self, capsys):
+        """--converge stops early once CI narrows."""
+        code = main([
+            "range",
+            "AhKh",
+            "TT+, AJs+",
+            "-c", "0.02",
+            "-n", "20000",
+            "-s", "42",
+            "--json",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["converged"] is True
+        assert data["sims_run"] < 20000
+
+    def test_range_parallel_execution(self, capsys):
+        """--parallel runs across worker processes."""
+        code = main([
+            "range",
+            "AhKh",
+            "TT+, AJs+",
+            "--parallel", "2",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Hero" in captured.out
+
+    def test_range_progress_flag(self, capsys):
+        """--progress executes simulation with real-time updates."""
+        code = main([
+            "range",
+            "AhKh",
+            "TT+, AJs+",
+            "--progress",
+            "-n", "500",
+            "-s", "42",
+        ])
+        assert code == 0
+
+    def test_range_missing_arguments_error(self, capsys):
+        """Missing hero or villain ranges returns exit code 2."""
+        code = main(["range"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Must specify both hero and villain ranges" in captured.err
+
+    def test_range_invalid_syntax_error(self, capsys):
+        """Invalid range token returns exit code 2."""
+        code = main(["range", "invalid_range_xyz", "QQ+"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error parsing" in captured.err
 
 
 class TestCliOddsCommand:

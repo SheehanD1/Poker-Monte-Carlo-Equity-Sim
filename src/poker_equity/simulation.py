@@ -248,6 +248,7 @@ def _coerce_board(board: Sequence[Card | str] | str | None) -> list[Card]:
 def _validate_multi_inputs(
     hands: Sequence[Sequence[Card] | Range | str | None],
     board: Sequence[Card | str] | str | None,
+    dead: Sequence[Card | str] | str | None = None,
 ) -> None:
     """Validate simulation inputs for multiple players.
 
@@ -262,6 +263,8 @@ def _validate_multi_inputs(
     if len(board_cards) > 5:
         msg = f"Board can have at most 5 cards, got {len(board_cards)}"
         raise ValueError(msg)
+
+    dead_cards = _coerce_board(dead)
 
     for i, hand in enumerate(hands):
         if hand is None:
@@ -294,7 +297,7 @@ def _validate_multi_inputs(
             )
             raise TypeError(msg)
 
-    all_cards = list(board_cards)
+    all_cards = list(board_cards) + list(dead_cards)
     for hand in hands:
         if hand is not None and isinstance(hand, (list, tuple)):
             for c in hand:
@@ -307,6 +310,10 @@ def _validate_multi_inputs(
                 msg = f"Duplicate card: {card}"
                 raise ValueError(msg)
             seen.add(card)
+
+    cards_needed = (5 - len(board_cards)) + 2 * sum(1 for h in hands if h is None)
+    if len(all_cards) + cards_needed > 52:
+        raise ValueError("Not enough cards remaining in deck for board and random hands")
 
 
 def _check_combos_mutually_exclusive_2p(
@@ -341,6 +348,7 @@ def _check_combos_mutually_exclusive_multi(
 def _prepare_simulation_inputs(
     hands: Sequence[Sequence[Card] | Range | str | None],
     board: Sequence[Card | str] | str | None,
+    dead: Sequence[Card | str] | str | None = None,
 ) -> tuple[
     list[Card],
     list[str],
@@ -353,14 +361,15 @@ def _prepare_simulation_inputs(
 ]:
     """Parse, validate, and prepare simulation inputs for multi-player simulation."""
     board_cards = _coerce_board(board)
-    _validate_multi_inputs(hands, board_cards)
+    dead_cards = _coerce_board(dead)
+    _validate_multi_inputs(hands, board_cards, dead_cards)
 
     player_kinds: list[str] = []
     player_fixed: list[tuple[Card, Card] | None] = []
     player_ranges: list[tuple[Combo, ...] | None] = []
     player_weights: list[tuple[float, ...] | None] = []
     player_is_weighted: list[bool] = []
-    fixed_cards: list[Card] = list(board_cards)
+    fixed_cards: list[Card] = list(board_cards) + list(dead_cards)
     has_range = False
 
     for i, hand in enumerate(hands):
@@ -466,6 +475,7 @@ def calculate_equities(
     hands: Sequence[Sequence[Card] | Range | str | None],
     board: Sequence[Card | str] | str | None = None,
     *,
+    dead: Sequence[Card | str] | str | None = None,
     num_sims: int = 10_000,
     seed: int | None = None,
     convergence_threshold: float | None = None,
@@ -537,7 +547,7 @@ def calculate_equities(
         player_is_weighted,
         fixed_cards,
         has_range,
-    ) = _prepare_simulation_inputs(hands, board)
+    ) = _prepare_simulation_inputs(hands, board, dead)
 
     num_players = len(hands)
     board_needed = 5 - len(board_cards)
@@ -871,6 +881,7 @@ def calculate_equity(
     villain: Sequence[Card] | Range | str | None = None,
     board: Sequence[Card | str] | str | None = None,
     *,
+    dead: Sequence[Card | str] | str | None = None,
     num_sims: int = 10_000,
     seed: int | None = None,
     convergence_threshold: float | None = None,
@@ -893,6 +904,8 @@ def calculate_equity(
     board:
         Known community cards (0 to 5), as a sequence of cards, a string,
         or ``None`` (preflop).
+    dead:
+        Optional sequence or string of dead / folded cards.
     num_sims:
         Maximum number of Monte Carlo simulations to run. Default is 10,000.
     seed:
@@ -933,6 +946,7 @@ def calculate_equity(
     results = calculate_equities(
         hands=[hero, villain],
         board=board,
+        dead=dead,
         num_sims=num_sims,
         seed=seed,
         convergence_threshold=convergence_threshold,
@@ -949,6 +963,7 @@ def range_vs_range_equity(
     board: Sequence[Card | str] | str | None = None,
     num_sims: int = 10_000,
     *,
+    dead: Sequence[Card | str] | str | None = None,
     seed: int | None = None,
     convergence_threshold: float | None = None,
     check_interval: int = 100,
@@ -976,6 +991,8 @@ def range_vs_range_equity(
         interpreted as *num_sims*.
     num_sims : int, default 10,000
         Maximum number of Monte Carlo simulations to run.
+    dead : Sequence[Card | str] | str | None, optional
+        Dead / folded cards to exclude from the deck and ranges.
     seed : int | None, optional
         Optional PRNG seed for reproducible results.
     convergence_threshold : float | None, optional
@@ -1009,6 +1026,7 @@ def range_vs_range_equity(
     return calculate_equities(
         hands=[range1, range2],
         board=board,
+        dead=dead,
         num_sims=num_sims,
         seed=seed,
         convergence_threshold=convergence_threshold,

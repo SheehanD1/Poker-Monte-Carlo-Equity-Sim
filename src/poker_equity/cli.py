@@ -16,10 +16,13 @@ import time
 from typing import Any, Callable, Sequence
 
 import poker_equity
+from poker_equity.breakdown import range_vs_hand_breakdown
 from poker_equity.card import Card, Rank, Suit
 from poker_equity.constants import cards_to_str, parse_cards
 from poker_equity.evaluator import evaluate_hand
 from poker_equity.parallel import calculate_equities_parallel
+from poker_equity.presets import PRESET_RANGES, get_preset_range, top_percent_range
+from poker_equity.range import Range, combo_to_cell, combo_to_str
 from poker_equity.simulation import (
     ProgressCallback,
     ProgressInfo,
@@ -200,6 +203,61 @@ def parse_player_hand_input(
         pass
 
     return s
+
+
+def parse_range_or_preset(spec: str) -> Range | tuple[Card, Card]:
+    """Parse range specification into a Range instance or 2-card tuple.
+
+    Supports:
+    - 2-card holdings: e.g. ``'AhKh'`` or ``'Ah Kh'``
+    - Standard poker range syntax: e.g. ``'QQ+, AKs'``
+    - Weighted range syntax: e.g. ``'AA:0.8, KK:0.5'``
+    - Percentage ranges: e.g. ``'20%'`` or ``'top 15%'``
+    - Preset range names: e.g. ``'BB_VS_BTN_3BET'``
+
+    Parameters
+    ----------
+    spec : str
+        String representing a range, percentage, preset, or 2-card hand.
+
+    Returns
+    -------
+    Range | tuple[Card, Card]
+        Parsed Range instance or canonical 2-card tuple.
+
+    Raises
+    ------
+    ValueError
+        If the input string cannot be parsed as a valid hand, range, or preset.
+    """
+    s = spec.strip()
+    if not s:
+        raise ValueError("Range specification cannot be empty")
+
+    # Check 2-card hand first
+    try:
+        cards = parse_cards_flexible(s)
+        if len(cards) == 2:
+            return (cards[0], cards[1])
+    except Exception:
+        pass
+
+    # Check percentage string (e.g. "20%", "top 15%")
+    if s.endswith("%"):
+        num_str = s.rstrip("%").lower().replace("top", "").strip()
+        try:
+            pct = float(num_str)
+            return top_percent_range(pct)
+        except ValueError:
+            pass
+
+    # Check preset name
+    s_upper = s.upper().replace("-", "_").replace(" ", "_")
+    if s_upper in PRESET_RANGES:
+        return get_preset_range(s_upper)
+
+    # Standard or weighted range string
+    return Range.from_str(s)
 
 
 def format_card_colored(
@@ -519,6 +577,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Community cards (e.g. '2h 7h 8c' or '2h7h8c3c4c').",
     )
     p_eq.add_argument(
+        "--dead",
+        "-d",
+        type=str,
+        default=None,
+        help="Dead / folded cards to exclude from the deck (e.g. 'Jc Ts').",
+    )
+    p_eq.add_argument(
         "--sims",
         "-n",
         type=int,
@@ -566,18 +631,23 @@ def create_parser() -> argparse.ArgumentParser:
         description="Evaluate equity against weighted or unweighted hand ranges.",
     )
     p_rng.add_argument(
+        "ranges",
+        nargs="*",
+        help="Hero and villain ranges as positional arguments (e.g. 'AhKh' 'TT+, AJs+').",
+    )
+    p_rng.add_argument(
         "--hero",
         "-H",
         type=str,
-        required=True,
-        help="Hero hand or range string (e.g. 'Ah Kh' or 'QQ+, AKs').",
+        default=None,
+        help="Hero hand or range string (e.g. 'Ah Kh', 'QQ+', 'TT+:0.5').",
     )
     p_rng.add_argument(
         "--villain",
         "-V",
         type=str,
-        required=True,
-        help="Villain range string (e.g. 'TT+, AJs+, KQs').",
+        default=None,
+        help="Villain range string (e.g. 'TT+, AJs+, KQs', '25%').",
     )
     p_rng.add_argument(
         "--board",
@@ -587,6 +657,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Community cards (e.g. '2h 7h 8c').",
     )
     p_rng.add_argument(
+        "--dead",
+        "-d",
+        type=str,
+        default=None,
+        help="Dead / folded cards to exclude from deck and ranges (e.g. 'Jc Ts').",
+    )
+    p_rng.add_argument(
         "--sims",
         "-n",
         type=int,
@@ -594,11 +671,44 @@ def create_parser() -> argparse.ArgumentParser:
         help="Number of simulations (default: 10,000).",
     )
     p_rng.add_argument(
+        "--converge",
+        "-c",
+        type=float,
+        default=None,
+        metavar="EPS",
+        help="Stop early when 95%% CI half-width is below EPS (e.g. 0.005 for ±0.5%%).",
+    )
+    p_rng.add_argument(
+        "--parallel",
+        "-j",
+        type=int,
+        nargs="?",
+        const=0,
+        default=None,
+        metavar="N",
+        help="Run across N worker processes (default: all CPU cores if -j given without value).",
+    )
+    p_rng.add_argument(
         "--seed",
         "-s",
         type=int,
         default=None,
-        help="RNG seed.",
+        help="RNG seed for deterministic evaluation.",
+    )
+    p_rng.add_argument(
+        "--progress",
+        action="store_true",
+        help="Display real-time simulation progress in terminal.",
+    )
+    p_rng.add_argument(
+        "--breakdown",
+        "-k",
+        type=int,
+        nargs="?",
+        const=10,
+        default=None,
+        metavar="N",
+        help="Show equity breakdown for top N combos in the range (for hand vs range).",
     )
 
     # ---------------------------------------------------------------------
@@ -835,6 +945,17 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
         sys.stderr.write(f"Error parsing board cards '{args.board}': {exc}\n")
         return 2
 
+    # Parse dead cards
+    try:
+        dead_cards = (
+            parse_cards_flexible(getattr(args, "dead", None))
+            if getattr(args, "dead", None)
+            else []
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing dead cards '{args.dead}': {exc}\n")
+        return 2
+
     # Parse player hands
     try:
         parsed_hands = [parse_player_hand_input(h) for h in raw_hands]
@@ -862,6 +983,7 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
             results = calculate_equities_parallel(
                 hands=parsed_hands,
                 board=board_cards,
+                dead=dead_cards,
                 num_sims=sims,
                 num_workers=num_workers,
                 seed=args.seed,
@@ -870,6 +992,7 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
             results = calculate_equities(
                 hands=parsed_hands,
                 board=board_cards,
+                dead=dead_cards,
                 num_sims=sims,
                 seed=args.seed,
                 convergence_threshold=getattr(args, "converge", None),
@@ -899,6 +1022,8 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
         data = {
             "board": [str(c) for c in board_cards] if board_cards else None,
             "board_str": cards_to_str(board_cards) if board_cards else None,
+            "dead": [str(c) for c in dead_cards] if dead_cards else None,
+            "dead_str": cards_to_str(dead_cards) if dead_cards else None,
             "sims_requested": sims,
             "sims_run": actual_sims,
             "converged": any(r.converged for r in results),
@@ -957,6 +1082,8 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
     print(colorize("Poker Monte Carlo Equity Simulation", Colors.BOLD, use_color))
     print("=" * 79)
     print(f"Board : {b_display}")
+    if dead_cards:
+        print(f"Dead  : {format_cards_colored(dead_cards, enable=use_color)}")
     print(
         f"Sims  : {actual_sims:,}{converged_note}  |  "
         f"Time: {time_str}  |  Speed: {sims_per_sec:,.0f} sims/sec"
@@ -1069,6 +1196,446 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
             f"  {lbl:7s}: Equity {r.equity * 100:5.2f}% ± {ci_half * 100:.2f}% (95% CI) "
             f"[Win: {r.win_pct * 100:.1f}%, Tie: {r.tie_pct * 100:.1f}%, Loss: {r.loss_pct * 100:.1f}%]"
         )
+
+    return 0
+
+
+def handle_range_command(args: argparse.Namespace, use_color: bool = True) -> int:
+    """Execute the 'range' subcommand."""
+    # Resolve hero and villain input
+    pos_ranges = getattr(args, "ranges", None) or []
+    if len(pos_ranges) >= 2:
+        hero_raw, villain_raw = pos_ranges[0], pos_ranges[1]
+    elif getattr(args, "hero", None) and getattr(args, "villain", None):
+        hero_raw, villain_raw = args.hero, args.villain
+    elif len(pos_ranges) == 1 and getattr(args, "villain", None):
+        hero_raw, villain_raw = pos_ranges[0], args.villain
+    elif getattr(args, "hero", None) and len(pos_ranges) == 1:
+        hero_raw, villain_raw = args.hero, pos_ranges[0]
+    else:
+        sys.stderr.write(
+            "Error: Must specify both hero and villain ranges (via --hero and --villain or positional arguments).\n"
+        )
+        return 2
+
+    # Parse board cards
+    try:
+        board_cards = parse_cards_flexible(args.board) if args.board else []
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing board cards '{args.board}': {exc}\n")
+        return 2
+
+    # Parse dead cards
+    try:
+        dead_cards = (
+            parse_cards_flexible(getattr(args, "dead", None))
+            if getattr(args, "dead", None)
+            else []
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing dead cards '{args.dead}': {exc}\n")
+        return 2
+
+    # Parse hero and villain
+    try:
+        hero_item = parse_range_or_preset(hero_raw)
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing hero range '{hero_raw}': {exc}\n")
+        return 2
+
+    try:
+        villain_item = parse_range_or_preset(villain_raw)
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing villain range '{villain_raw}': {exc}\n")
+        return 2
+
+    # Metadata extraction
+    def get_range_meta(
+        item: Range | tuple[Card, Card],
+        opp_item: Range | tuple[Card, Card],
+        raw_spec: str,
+    ) -> dict[str, Any]:
+        all_dead = list(board_cards) + list(dead_cards)
+        if isinstance(opp_item, tuple):
+            all_dead.extend(opp_item)
+
+        if isinstance(item, tuple):
+            return {
+                "is_range": False,
+                "spec": raw_spec,
+                "display": format_cards_colored(item, enable=use_color),
+                "type_desc": get_hand_type_description(item, board_cards),
+                "total_combos": 1,
+                "weighted_combos": 1.0,
+                "live_combos": 1,
+                "live_weighted": 1.0,
+                "is_weighted": False,
+                "pct_of_hands": 1 / 1326,
+            }
+        else:
+            live_r = item.remove_dead_cards(all_dead)
+            return {
+                "is_range": True,
+                "spec": raw_spec,
+                "display": raw_spec,
+                "type_desc": f"{len(item)} combos"
+                + (
+                    f" ({item.total_combos:.1f} weighted)"
+                    if item.is_weighted
+                    else ""
+                ),
+                "total_combos": len(item),
+                "weighted_combos": item.total_combos,
+                "live_combos": len(live_r),
+                "live_weighted": live_r.total_combos,
+                "is_weighted": item.is_weighted,
+                "pct_of_hands": len(live_r) / 1326,
+            }
+
+    hero_meta = get_range_meta(hero_item, villain_item, hero_raw)
+    villain_meta = get_range_meta(villain_item, hero_item, villain_raw)
+
+    sims = max(1, args.sims)
+
+    # Progress callback setup
+    on_prog: ProgressCallback | None = None
+    finish_prog: Callable[[], None] = lambda: None
+    if getattr(args, "progress", False) and not args.json:
+        on_prog, finish_prog = make_progress_callback()
+
+    # Simulation execution
+    t0 = time.perf_counter()
+    try:
+        if getattr(args, "parallel", None) is not None:
+            num_workers = (
+                os.cpu_count() or 1
+                if args.parallel == 0
+                else max(1, args.parallel)
+            )
+            results = calculate_equities_parallel(
+                hands=[hero_item, villain_item],
+                board=board_cards,
+                dead=dead_cards,
+                num_sims=sims,
+                num_workers=num_workers,
+                seed=args.seed,
+            )
+        else:
+            results = calculate_equities(
+                hands=[hero_item, villain_item],
+                board=board_cards,
+                dead=dead_cards,
+                num_sims=sims,
+                seed=args.seed,
+                convergence_threshold=getattr(args, "converge", None),
+                on_progress=on_prog,
+            )
+    except Exception as exc:
+        finish_prog()
+        sys.stderr.write(f"Simulation error: {exc}\n")
+        return 2
+    finally:
+        finish_prog()
+
+    elapsed = time.perf_counter() - t0
+    actual_sims = results[0].num_sims if results else sims
+    sims_per_sec = actual_sims / elapsed if elapsed > 0 else 0.0
+
+    hero_res = results[0]
+    villain_res = results[1]
+
+    hero_ci = (
+        hero_res.convergence_ci
+        if hero_res.convergence_ci > 0
+        else (
+            1.96
+            * math.sqrt(
+                hero_res.equity
+                * (1.0 - hero_res.equity)
+                / max(1, hero_res.num_sims)
+            )
+        )
+    )
+    villain_ci = (
+        villain_res.convergence_ci
+        if villain_res.convergence_ci > 0
+        else (
+            1.96
+            * math.sqrt(
+                villain_res.equity
+                * (1.0 - villain_res.equity)
+                / max(1, villain_res.num_sims)
+            )
+        )
+    )
+
+    # Optional combo breakdown calculation
+    breakdown_list = []
+    breakdown_target_name = None
+    if getattr(args, "breakdown", None) is not None:
+        top_n = max(1, args.breakdown)
+        if isinstance(hero_item, tuple) and isinstance(villain_item, Range):
+            breakdown_target_name = "Villain"
+            dead_for_breakdown = (
+                list(board_cards) + list(dead_cards) + list(hero_item)
+            )
+            live_target = villain_item.remove_dead_cards(dead_for_breakdown)
+            if not live_target.is_empty:
+                bd = range_vs_hand_breakdown(
+                    live_target,
+                    hero_item,
+                    board=board_cards,
+                    num_sims_per_combo=min(
+                        1000, max(200, sims // max(1, len(live_target)))
+                    ),
+                    seed=args.seed,
+                )
+                breakdown_list = [
+                    {
+                        "combo": combo_to_str(c),
+                        "cell": combo_to_cell(c),
+                        "equity": r.equity,
+                        "win_pct": r.win_pct,
+                        "tie_pct": r.tie_pct,
+                        "loss_pct": r.loss_pct,
+                        "weight": live_target.get_weight(c),
+                    }
+                    for c, r in bd.sorted_combos(descending=True)[:top_n]
+                ]
+        elif isinstance(hero_item, Range) and isinstance(villain_item, tuple):
+            breakdown_target_name = "Hero"
+            dead_for_breakdown = (
+                list(board_cards) + list(dead_cards) + list(villain_item)
+            )
+            live_target = hero_item.remove_dead_cards(dead_for_breakdown)
+            if not live_target.is_empty:
+                bd = range_vs_hand_breakdown(
+                    live_target,
+                    villain_item,
+                    board=board_cards,
+                    num_sims_per_combo=min(
+                        1000, max(200, sims // max(1, len(live_target)))
+                    ),
+                    seed=args.seed,
+                )
+                breakdown_list = [
+                    {
+                        "combo": combo_to_str(c),
+                        "cell": combo_to_cell(c),
+                        "equity": r.equity,
+                        "win_pct": r.win_pct,
+                        "tie_pct": r.tie_pct,
+                        "loss_pct": r.loss_pct,
+                        "weight": live_target.get_weight(c),
+                    }
+                    for c, r in bd.sorted_combos(descending=True)[:top_n]
+                ]
+
+    # JSON output
+    if args.json:
+        data = {
+            "board": [str(c) for c in board_cards] if board_cards else None,
+            "board_str": cards_to_str(board_cards) if board_cards else None,
+            "dead": [str(c) for c in dead_cards] if dead_cards else None,
+            "dead_str": cards_to_str(dead_cards) if dead_cards else None,
+            "sims_requested": sims,
+            "sims_run": actual_sims,
+            "converged": any(r.converged for r in results),
+            "elapsed_seconds": round(elapsed, 4),
+            "sims_per_second": round(sims_per_sec, 1),
+            "hero": {
+                "spec": hero_raw,
+                "is_range": hero_meta["is_range"],
+                "total_combos": hero_meta["total_combos"],
+                "weighted_combos": round(hero_meta["weighted_combos"], 2),
+                "live_combos": hero_meta["live_combos"],
+                "live_weighted_combos": round(hero_meta["live_weighted"], 2),
+                "pct_of_hands": round(hero_meta["pct_of_hands"] * 100, 2),
+                "equity": hero_res.equity,
+                "win_pct": hero_res.win_pct,
+                "tie_pct": hero_res.tie_pct,
+                "loss_pct": hero_res.loss_pct,
+                "wins": hero_res.wins,
+                "ties": hero_res.ties,
+                "losses": hero_res.losses,
+                "ci_95_half_width": round(hero_ci, 4),
+                "ci_95_low": max(0.0, round(hero_res.equity - hero_ci, 4)),
+                "ci_95_high": min(1.0, round(hero_res.equity + hero_ci, 4)),
+            },
+            "villain": {
+                "spec": villain_raw,
+                "is_range": villain_meta["is_range"],
+                "total_combos": villain_meta["total_combos"],
+                "weighted_combos": round(villain_meta["weighted_combos"], 2),
+                "live_combos": villain_meta["live_combos"],
+                "live_weighted_combos": round(
+                    villain_meta["live_weighted"], 2
+                ),
+                "pct_of_hands": round(villain_meta["pct_of_hands"] * 100, 2),
+                "equity": villain_res.equity,
+                "win_pct": villain_res.win_pct,
+                "tie_pct": villain_res.tie_pct,
+                "loss_pct": villain_res.loss_pct,
+                "wins": villain_res.wins,
+                "ties": villain_res.ties,
+                "losses": villain_res.losses,
+                "ci_95_half_width": round(villain_ci, 4),
+                "ci_95_low": max(0.0, round(villain_res.equity - villain_ci, 4)),
+                "ci_95_high": min(1.0, round(villain_res.equity + villain_ci, 4)),
+            },
+        }
+        if breakdown_list:
+            data["breakdown"] = breakdown_list
+        print(json.dumps(data, indent=2))
+        return 0
+
+    # Human-readable formatted terminal output
+    if elapsed < 0.001:
+        time_str = f"{elapsed * 1_000_000:.0f} µs"
+    elif elapsed < 1.0:
+        time_str = f"{elapsed * 1000:.1f} ms"
+    else:
+        time_str = f"{elapsed:.2f} s"
+
+    converged_note = " [converged]" if any(r.converged for r in results) else ""
+    b_display = (
+        format_cards_colored(board_cards, enable=use_color)
+        if board_cards
+        else "None (Preflop)"
+    )
+
+    print(colorize("Range vs Range Equity Simulation", Colors.BOLD, use_color))
+    print("=" * 79)
+    print(f"Board : {b_display}")
+    if dead_cards:
+        print(f"Dead  : {format_cards_colored(dead_cards, enable=use_color)}")
+    print(
+        f"Sims  : {actual_sims:,}{converged_note}  |  "
+        f"Time: {time_str}  |  Speed: {sims_per_sec:,.0f} sims/sec"
+    )
+    print("-" * 79)
+
+    h_desc = (
+        f"{hero_meta['total_combos']} combos, {hero_meta['live_combos']} live "
+        f"[{hero_meta['pct_of_hands'] * 100:.1f}%]"
+    ) if hero_meta["is_range"] else hero_meta["type_desc"]
+    v_desc = (
+        f"{villain_meta['total_combos']} combos, {villain_meta['live_combos']} live "
+        f"[{villain_meta['pct_of_hands'] * 100:.1f}%]"
+    ) if villain_meta["is_range"] else villain_meta["type_desc"]
+
+    print(f"Hero   : {hero_meta['display']} ({h_desc})")
+    print(f"Villain: {villain_meta['display']} ({v_desc})")
+    print("-" * 79)
+
+    col_w = {
+        "player": 7,
+        "range": 22,
+        "equity": 8,
+        "win": 7,
+        "tie": 7,
+        "bar": 12,
+    }
+    top_line = (
+        f"┌─{'─' * col_w['player']}─"
+        f"┬─{'─' * col_w['range']}─"
+        f"┬─{'─' * col_w['equity']}─"
+        f"┬─{'─' * col_w['win']}─"
+        f"┬─{'─' * col_w['tie']}─"
+        f"┬─{'─' * col_w['bar']}─┐"
+    )
+    hdr_line = (
+        f"│ {pad_visible('Player', col_w['player'])} "
+        f"│ {pad_visible('Range / Hand', col_w['range'])} "
+        f"│ {pad_visible('Equity', col_w['equity'], 'right')} "
+        f"│ {pad_visible('Win %', col_w['win'], 'right')} "
+        f"│ {pad_visible('Tie %', col_w['tie'], 'right')} "
+        f"│ {pad_visible('Visual Bar', col_w['bar'], 'center')} │"
+    )
+    sep_line = (
+        f"├─{'─' * col_w['player']}─"
+        f"┼─{'─' * col_w['range']}─"
+        f"┼─{'─' * col_w['equity']}─"
+        f"┼─{'─' * col_w['win']}─"
+        f"┼─{'─' * col_w['tie']}─"
+        f"┼─{'─' * col_w['bar']}─┤"
+    )
+    bot_line = (
+        f"└─{'─' * col_w['player']}─"
+        f"┴─{'─' * col_w['range']}─"
+        f"┴─{'─' * col_w['equity']}─"
+        f"┴─{'─' * col_w['win']}─"
+        f"┴─{'─' * col_w['tie']}─"
+        f"┴─{'─' * col_w['bar']}─┘"
+    )
+
+    print(top_line)
+    print(hdr_line)
+    print(sep_line)
+
+    for p_name, meta, res in [
+        ("Hero", hero_meta, hero_res),
+        ("Villain", villain_meta, villain_res),
+    ]:
+        eq_pct_str = f"{res.equity * 100:.2f}%"
+        eq_col = (
+            Colors.GREEN
+            if res.equity >= 0.55
+            else (Colors.YELLOW if res.equity >= 0.40 else Colors.RED)
+        )
+        eq_colored = colorize(eq_pct_str, eq_col, use_color)
+        bar_str = make_equity_bar(
+            res.equity, width=col_w["bar"] - 2, enable=use_color
+        )
+
+        label_display = meta["display"]
+        if len(label_display) > col_w["range"]:
+            label_display = label_display[: col_w["range"] - 1] + "…"
+
+        row_str = (
+            f"│ {pad_visible(p_name, col_w['player'])} "
+            f"│ {pad_visible(label_display, col_w['range'])} "
+            f"│ {pad_visible(eq_colored, col_w['equity'], 'right')} "
+            f"│ {pad_visible(f'{res.win_pct * 100:.1f}%', col_w['win'], 'right')} "
+            f"│ {pad_visible(f'{res.tie_pct * 100:.1f}%', col_w['tie'], 'right')} "
+            f"│ {pad_visible(bar_str, col_w['bar'], 'center')} │"
+        )
+        print(row_str)
+
+    print(bot_line)
+
+    print(
+        f"  Hero   : Equity {hero_res.equity * 100:5.2f}% ± {hero_ci * 100:.2f}% (95% CI) "
+        f"[Win: {hero_res.win_pct * 100:.1f}%, Tie: {hero_res.tie_pct * 100:.1f}%, Loss: {hero_res.loss_pct * 100:.1f}%]"
+    )
+    print(
+        f"  Villain: Equity {villain_res.equity * 100:5.2f}% ± {villain_ci * 100:.2f}% (95% CI) "
+        f"[Win: {villain_res.win_pct * 100:.1f}%, Tie: {villain_res.tie_pct * 100:.1f}%, Loss: {villain_res.loss_pct * 100:.1f}%]"
+    )
+
+    if breakdown_list and breakdown_target_name:
+        print(
+            "\n"
+            + colorize(
+                f"Top {len(breakdown_list)} Combos in {breakdown_target_name} Range",
+                Colors.BOLD,
+                use_color,
+            )
+        )
+        print("-" * 65)
+        print(
+            f"{'Combo':<8} {'Cell':<6} {'Equity':<10} {'Win %':<10} {'Tie %':<10} {'Weight':<8}"
+        )
+        print("-" * 65)
+        for item in breakdown_list:
+            c_str = item["combo"]
+            c_colored = format_cards_colored(c_str, enable=use_color)
+            eq_str = f"{item['equity'] * 100:.1f}%"
+            print(
+                f"{pad_visible(c_colored, 8)} {item['cell']:<6} {eq_str:<10} "
+                f"{item['win_pct'] * 100:.1f}%     {item['tie_pct'] * 100:.1f}%     {item['weight']:.2f}"
+            )
+        print("-" * 65)
 
     return 0
 
@@ -1274,9 +1841,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "curve":
             return handle_curve_command(args, use_color=use_color)
         elif args.command == "range":
-            # Scaffold for range command (completed in Commit 53)
-            print("Range-vs-range CLI command scaffolded.")
-            return 0
+            return handle_range_command(args, use_color=use_color)
         else:
             parser.print_help()
             return 1
