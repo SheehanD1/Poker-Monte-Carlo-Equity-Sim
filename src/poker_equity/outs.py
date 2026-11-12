@@ -419,6 +419,7 @@ def calculate_outs(
     hero: Sequence[Card | str] | str,
     villain: Sequence[Card | str] | str,
     board: Sequence[Card | str] | str,
+    dead: Sequence[Card | str] | str | None = None,
 ) -> OutsResult:
     """Calculate the outs for Hero against Villain on a given board.
 
@@ -434,6 +435,8 @@ def calculate_outs(
         Villain's 2 hole cards.
     board : Sequence[Card | str] | str
         The community cards (must contain 3 cards for flop or 4 cards for turn).
+    dead : Sequence[Card | str] | str | None, default=None
+        Known dead or folded cards to exclude from the deck.
 
     Returns
     -------
@@ -462,17 +465,22 @@ def calculate_outs(
     hero_cards = _coerce_cards(hero, expected_len=2, name="hero")
     villain_cards = _coerce_cards(villain, expected_len=2, name="villain")
     board_cards = _coerce_cards(board, expected_len=(3, 4), name="board")
+    dead_input_cards = _coerce_cards(dead, name="dead") if dead else []
 
     all_cards = hero_cards + villain_cards + board_cards
     if len(set(all_cards)) != len(all_cards):
         raise ValueError(f"Duplicate cards detected in inputs: {cards_to_str(all_cards)}")
+    if dead_input_cards:
+        overlap = set(all_cards) & set(dead_input_cards)
+        if overlap:
+            raise ValueError(f"Duplicate cards detected in inputs: {cards_to_str(list(overlap))}")
 
     # Evaluate current situation
     hero_curr = evaluate_hand(hero_cards + board_cards)
     villain_curr = evaluate_hand(villain_cards + board_cards)
     is_ahead = hero_curr > villain_curr
 
-    dead_cards = set(all_cards)
+    dead_cards = set(all_cards) | set(dead_input_cards)
     unseen_cards = [c for c in FULL_DECK_LIST if c not in dead_cards]
 
     win_outs: list[Card] = []
@@ -514,6 +522,7 @@ def calculate_improvement_outs(
     hand: Sequence[Card | str] | str,
     board: Sequence[Card | str] | str,
     target_rank: HandRank | None = None,
+    dead: Sequence[Card | str] | str | None = None,
 ) -> dict[HandRank, tuple[Card, ...]]:
     """Find all remaining cards that improve a hand or reach a target hand rank.
 
@@ -531,6 +540,8 @@ def calculate_improvement_outs(
         The community cards (3 or 4 cards).
     target_rank : HandRank or None, default=None
         Minimum target hand rank to achieve.
+    dead : Sequence[Card | str] | str | None, default=None
+        Known dead or folded cards to exclude from the deck.
 
     Returns
     -------
@@ -544,14 +555,19 @@ def calculate_improvement_outs(
     """
     hand_cards = _coerce_cards(hand, expected_len=2, name="hand")
     board_cards = _coerce_cards(board, expected_len=(3, 4), name="board")
+    dead_input_cards = _coerce_cards(dead, name="dead") if dead else []
 
     all_cards = hand_cards + board_cards
     if len(set(all_cards)) != len(all_cards):
         raise ValueError(f"Duplicate cards detected: {cards_to_str(all_cards)}")
+    if dead_input_cards:
+        overlap = set(all_cards) & set(dead_input_cards)
+        if overlap:
+            raise ValueError(f"Duplicate cards detected: {cards_to_str(list(overlap))}")
 
     curr_result = evaluate_hand(hand_cards + board_cards)
 
-    dead_cards = set(all_cards)
+    dead_cards = set(all_cards) | set(dead_input_cards)
     unseen_cards = [c for c in FULL_DECK_LIST if c not in dead_cards]
 
     improving_cards: dict[HandRank, list[Card]] = {}

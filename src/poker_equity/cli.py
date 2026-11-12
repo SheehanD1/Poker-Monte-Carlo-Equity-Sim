@@ -260,6 +260,36 @@ def parse_range_or_preset(spec: str) -> Range | tuple[Card, Card]:
     return Range.from_str(s)
 
 
+def parse_equity_value(val: str | float | int) -> float:
+    """Parse equity value from fraction (0.35) or percentage string ('35%', '35').
+
+    Parameters
+    ----------
+    val : str | float | int
+        Equity representation.
+
+    Returns
+    -------
+    float
+        Parsed equity in range [0.0, 1.0].
+
+    Raises
+    ------
+    ValueError
+        If the value cannot be parsed as a float.
+    """
+    if isinstance(val, (int, float)):
+        f = float(val)
+        return f / 100.0 if f > 1.0 else f
+    s = str(val).strip()
+    if s.endswith("%"):
+        s = s[:-1].strip()
+        f = float(s) / 100.0
+        return f
+    f = float(s)
+    return f / 100.0 if f > 1.0 else f
+
+
 def format_card_colored(
     card: Card | str | None,
     enable: bool = True,
@@ -721,25 +751,30 @@ def create_parser() -> argparse.ArgumentParser:
         description="Compute pot odds requirement, EV of calling, and future bets needed.",
     )
     p_odds.add_argument(
+        "numbers",
+        nargs="*",
+        help="Positional numbers: <pot> <call> [<equity>] (e.g. '100 50' or '100 50 35%%').",
+    )
+    p_odds.add_argument(
         "--pot",
         "-p",
         type=float,
-        required=True,
+        default=None,
         help="Current pot size before calling.",
     )
     p_odds.add_argument(
         "--call",
         "-c",
         type=float,
-        required=True,
+        default=None,
         help="Amount to call.",
     )
     p_odds.add_argument(
         "--equity",
         "-e",
-        type=float,
+        type=str,
         default=None,
-        help="Hero equity as a fraction (0.0 to 1.0) or percentage (0 to 100).",
+        help="Hero equity as a fraction (0.0 to 1.0) or percentage (e.g. '35%%' or '35').",
     )
     p_odds.add_argument(
         "--future-bets",
@@ -747,6 +782,19 @@ def create_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Expected future chips won on later streets (implied odds).",
+    )
+    p_odds.add_argument(
+        "--future-losses",
+        "-l",
+        type=float,
+        default=0.0,
+        help="Potential future chips lost on later streets if outdrawn (reverse implied odds).",
+    )
+    p_odds.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Prompt interactively for pot, call, and equity values.",
     )
 
     # ---------------------------------------------------------------------
@@ -759,25 +807,37 @@ def create_parser() -> argparse.ArgumentParser:
         description="Identify winning outs on flop or turn and convert to equity.",
     )
     p_outs.add_argument(
+        "cards",
+        nargs="*",
+        help="Positional cards: <hero> <villain> <board> (e.g. 'AhKh' 'QcQd' '2h 7h 8c').",
+    )
+    p_outs.add_argument(
         "--hero",
         "-H",
         type=str,
-        required=True,
+        default=None,
         help="Hero hole cards (e.g. 'Ah Kh').",
     )
     p_outs.add_argument(
         "--villain",
         "-V",
         type=str,
-        required=True,
+        default=None,
         help="Villain hole cards (e.g. 'Qc Qd').",
     )
     p_outs.add_argument(
         "--board",
         "-b",
         type=str,
-        required=True,
-        help="Flop (3 cards) or Turn (4 cards).",
+        default=None,
+        help="Flop (3 cards) or Turn (4 cards) (e.g. '2h 7h 8c').",
+    )
+    p_outs.add_argument(
+        "--dead",
+        "-d",
+        type=str,
+        default=None,
+        help="Known dead or folded cards to exclude from the deck (e.g. 'Jc Ts').",
     )
     p_outs.add_argument(
         "--method",
@@ -785,6 +845,12 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["exact", "rule", "adjusted_rule"],
         default="exact",
         help="Method to calculate equity from outs (default: exact).",
+    )
+    p_outs.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Prompt interactively for hero, villain, and board cards.",
     )
 
     # ---------------------------------------------------------------------
@@ -1641,42 +1707,190 @@ def handle_range_command(args: argparse.Namespace, use_color: bool = True) -> in
 
 
 def handle_odds_command(args: argparse.Namespace, use_color: bool = True) -> int:
-    """Execute the 'odds' subcommand."""
+    """Execute the 'odds' subcommand for pot odds, EV, and implied odds analysis.
+
+    Supports positional arguments (e.g. ``odds 100 50 35%``), flags (``--pot``,
+    ``--call``, ``--equity``, ``--future-bets``, ``--future-losses``), and
+    interactive prompting mode.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    use_color : bool, default=True
+        Whether ANSI color formatting is enabled.
+
+    Returns
+    -------
+    int
+        Exit status code (0 for success, non-zero for error).
+
+    Examples
+    --------
+    >>> import argparse
+    >>> from poker_equity.cli import handle_odds_command
+    >>> args = argparse.Namespace(
+    ...     numbers=["100", "50"], pot=None, call=None, equity="0.40",
+    ...     future_bets=0.0, future_losses=0.0, interactive=False, json=True
+    ... )
+    >>> handle_odds_command(args, use_color=False)
+    0
+    """
     pot = args.pot
     call = args.call
+    raw_equity = args.equity
+    numbers = getattr(args, "numbers", []) or []
+
+    # Interactive prompt if requested or in interactive tty with no arguments
+    if getattr(args, "interactive", False) or (
+        pot is None and call is None and not numbers and sys.stdin.isatty()
+    ):
+        try:
+            if pot is None:
+                val = input("Enter pot size: ").strip()
+                pot = float(val)
+            if call is None:
+                val = input("Enter bet to call: ").strip()
+                call = float(val)
+            if raw_equity is None:
+                val = input("Enter hero equity (optional, e.g. '35%' or '0.35', or Enter to skip): ").strip()
+                if val:
+                    raw_equity = val
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\nOdds calculation cancelled.\n")
+            return 1
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing interactive inputs: {exc}\n")
+            return 2
+
+    # Parse positional numbers if pot / call / equity not set via flags
+    if numbers:
+        if pot is None and len(numbers) >= 1:
+            try:
+                pot = float(numbers[0])
+            except ValueError:
+                sys.stderr.write(f"Error: Invalid pot size '{numbers[0]}'. Must be a number.\n")
+                return 2
+        if call is None and len(numbers) >= 2:
+            try:
+                call = float(numbers[1])
+            except ValueError:
+                sys.stderr.write(f"Error: Invalid bet to call '{numbers[1]}'. Must be a number.\n")
+                return 2
+        if raw_equity is None and len(numbers) >= 3:
+            raw_equity = numbers[2]
+
+    if pot is None or call is None:
+        sys.stderr.write(
+            "Error: Must specify both pot size and bet to call (e.g. 'poker-equity odds 100 50' or '--pot 100 --call 50').\n"
+        )
+        return 2
+
+    if pot < 0 or call < 0:
+        sys.stderr.write("Error: Pot size and bet to call must be non-negative.\n")
+        return 2
+
+    # Parse equity if provided
+    equity: float | None = None
+    if raw_equity is not None:
+        try:
+            equity = parse_equity_value(raw_equity)
+            if not (0.0 <= equity <= 1.0):
+                sys.stderr.write(
+                    f"Error: Equity must be between 0.0 and 1.0 (or 0% and 100%), got {raw_equity}.\n"
+                )
+                return 2
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing equity '{raw_equity}': {exc}\n")
+            return 2
+
+    future_bets = getattr(args, "future_bets", 0.0) or 0.0
+    future_losses = getattr(args, "future_losses", 0.0) or 0.0
+
     req_odds = poker_equity.pot_odds(pot, call)
     ratio = poker_equity.pot_odds_ratio(pot, call)
+    ratio_str = f"{ratio[0]:.2f}:1" if ratio[0] != float("inf") else "inf:1"
 
-    equity = args.equity
-    if equity is not None and equity > 1.0:
-        equity = equity / 100.0  # Allow user to pass percentage (e.g. 35 -> 0.35)
+    ev_val: float | None = None
+    direct_ev: float | None = None
+    ev_with_future: float | None = None
+    is_profitable: bool | None = None
+    req_future: float | None = None
 
-    ev_val = None
     if equity is not None:
-        ev_val = poker_equity.expected_value(equity, pot + args.future_bets, call)
+        direct_ev = poker_equity.expected_value(equity, pot, call)
+        ev_val = poker_equity.expected_value(equity, pot + future_bets, call)
+        ev_with_future = ev_val
+        is_profitable = poker_equity.is_profitable_call(equity, pot, call)
+        req_future = poker_equity.required_implied_odds(pot, call, equity)
+
+    imp_odds: float | None = None
+    imp_ratio: tuple[float, float] | None = None
+    imp_ratio_str: str | None = None
+    if future_bets > 0:
+        imp_odds = poker_equity.implied_odds(pot, call, future_bets)
+        imp_ratio = poker_equity.implied_odds_ratio(pot, call, future_bets)
+        imp_ratio_str = f"{imp_ratio[0]:.2f}:1" if imp_ratio[0] != float("inf") else "inf:1"
+
+    rev_imp_odds: float | None = None
+    if future_losses > 0:
+        rev_imp_odds = poker_equity.reverse_implied_odds(pot, call, future_losses)
 
     if args.json:
         data = {
             "pot_size": pot,
             "bet_to_call": call,
             "pot_odds_pct": req_odds,
-            "pot_odds_ratio": ratio,
+            "pot_odds_ratio": list(ratio),
+            "pot_odds_ratio_str": ratio_str,
             "equity": equity,
             "ev": ev_val,
+            "direct_ev": direct_ev,
+            "is_profitable": is_profitable,
+            "recommendation": ("CALL" if ev_val >= 0 else "FOLD") if ev_val is not None else None,
+            "future_bets": future_bets,
+            "future_losses": future_losses,
+            "implied_odds_pct": imp_odds,
+            "implied_odds_ratio": list(imp_ratio) if imp_ratio else None,
+            "implied_odds_ratio_str": imp_ratio_str,
+            "required_future_bets": req_future,
+            "ev_with_future_bets": ev_with_future if future_bets > 0 else None,
+            "reverse_implied_odds_pct": rev_imp_odds,
         }
         print(json.dumps(data, indent=2))
         return 0
 
     print(colorize("Pot Odds & EV Analysis", Colors.BOLD, use_color))
-    print("=" * 40)
+    print("=" * 48)
     print(f"Pot Size        : {pot:.2f} chips")
     print(f"Cost to Call    : {call:.2f} chips")
+    print(f"Total Pot       : {pot + call:.2f} chips")
     print(f"Pot Odds        : {colorize(f'{req_odds * 100:.2f}%', Colors.CYAN, use_color)} ({ratio})")
 
+    if future_bets > 0 and imp_odds is not None:
+        print(f"Future Bets     : +{future_bets:.2f} chips anticipated")
+        print(f"Implied Odds    : {colorize(f'{imp_odds * 100:.2f}%', Colors.CYAN, use_color)} ({imp_ratio_str})")
+
+    if future_losses > 0 and rev_imp_odds is not None:
+        print(f"Future Losses   : -{future_losses:.2f} chips potential")
+        print(f"Rev Implied Odds: {colorize(f'{rev_imp_odds * 100:.2f}%', Colors.YELLOW, use_color)}")
+
     if equity is not None:
+        print("-" * 48)
+        print(f"Hero Equity     : {colorize(f'{equity * 100:.2f}%', Colors.BOLD, use_color)}")
         ev_col = Colors.GREEN if ev_val >= 0 else Colors.RED
-        print(f"Hero Equity     : {equity * 100:.2f}%")
         print(f"Expected Value  : {colorize(f'{ev_val:+.2f} chips', ev_col, use_color)}")
+
+        if future_bets > 0 and direct_ev is not None:
+            dir_col = Colors.GREEN if direct_ev >= 0 else Colors.RED
+            print(f"Direct EV       : {colorize(f'{direct_ev:+.2f} chips', dir_col, use_color)}")
+
+        if req_future is not None:
+            if req_future > 0:
+                print(f"Req Implied Bets: +{req_future:.2f} chips needed on later streets")
+            else:
+                print("Req Implied Bets: 0.00 chips (Direct pot odds sufficient)")
+
         rec = "CALL" if ev_val >= 0 else "FOLD"
         print(f"Recommendation  : {colorize(rec, ev_col, use_color)}")
 
@@ -1684,41 +1898,225 @@ def handle_odds_command(args: argparse.Namespace, use_color: bool = True) -> int
 
 
 def handle_outs_command(args: argparse.Namespace, use_color: bool = True) -> int:
-    """Execute the 'outs' subcommand."""
-    res = poker_equity.calculate_outs(
-        hero=args.hero,
-        villain=args.villain,
-        board=args.board,
-    )
+    """Execute the 'outs' subcommand for drawing outs and equity calculation.
 
-    board_cards = parse_cards(args.board)
+    Identifies winning and tie outs on the flop or turn, evaluates made hand
+    categories, computes Rule of 2/4 and exact mathematical equities, and
+    displays cards grouped by resulting made hand.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    use_color : bool, default=True
+        Whether ANSI color formatting is enabled.
+
+    Returns
+    -------
+    int
+        Exit status code (0 for success, non-zero for error).
+
+    Examples
+    --------
+    >>> import argparse
+    >>> from poker_equity.cli import handle_outs_command
+    >>> args = argparse.Namespace(
+    ...     cards=["AhKh", "QcQd", "2h 7h 8c"], hero=None, villain=None,
+    ...     board=None, dead=None, method="exact", interactive=False, json=True
+    ... )
+    >>> handle_outs_command(args, use_color=False)
+    0
+    """
+    hero_raw = args.hero
+    villain_raw = args.villain
+    board_raw = args.board
+    cards_pos = getattr(args, "cards", []) or []
+
+    # Interactive prompt if requested or in interactive tty with no arguments
+    if getattr(args, "interactive", False) or (
+        hero_raw is None and villain_raw is None and board_raw is None and not cards_pos and sys.stdin.isatty()
+    ):
+        try:
+            if hero_raw is None:
+                hero_raw = input("Enter Hero cards (e.g. 'Ah Kh'): ").strip()
+            if villain_raw is None:
+                villain_raw = input("Enter Villain cards (e.g. 'Qc Qd'): ").strip()
+            if board_raw is None:
+                board_raw = input("Enter Board cards (3 or 4 cards, e.g. '2h 7h 8c'): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\nOuts calculation cancelled.\n")
+            return 1
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing interactive inputs: {exc}\n")
+            return 2
+
+    # Positional resolution
+    if cards_pos:
+        if len(cards_pos) == 3:
+            hero_raw = hero_raw or cards_pos[0]
+            villain_raw = villain_raw or cards_pos[1]
+            board_raw = board_raw or cards_pos[2]
+        elif len(cards_pos) >= 7 and (hero_raw is None or villain_raw is None or board_raw is None):
+            try:
+                all_pos_cards = parse_cards_flexible(" ".join(cards_pos))
+                if len(all_pos_cards) in (7, 8):
+                    if hero_raw is None:
+                        hero_raw = cards_to_str(all_pos_cards[0:2])
+                    if villain_raw is None:
+                        villain_raw = cards_to_str(all_pos_cards[2:4])
+                    if board_raw is None:
+                        board_raw = cards_to_str(all_pos_cards[4:])
+            except Exception:
+                pass
+        elif hero_raw is not None and villain_raw is not None and board_raw is None:
+            board_raw = " ".join(cards_pos)
+
+    if not hero_raw or not villain_raw or not board_raw:
+        sys.stderr.write(
+            "Error: Must specify hero hole cards, villain hole cards, and board cards (3 or 4 cards) "
+            "(e.g. 'poker-equity outs AhKh QcQd \"2h 7h 8c\"' or '--hero AhKh --villain QcQd --board \"2h 7h 8c\"').\n"
+        )
+        return 2
+
+    try:
+        hero_cards = parse_cards_flexible(hero_raw)
+        if len(hero_cards) != 2:
+            sys.stderr.write(f"Error: Hero must have exactly 2 cards, got {len(hero_cards)}.\n")
+            return 2
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing hero cards '{hero_raw}': {exc}\n")
+        return 2
+
+    try:
+        villain_cards = parse_cards_flexible(villain_raw)
+        if len(villain_cards) != 2:
+            sys.stderr.write(f"Error: Villain must have exactly 2 cards, got {len(villain_cards)}.\n")
+            return 2
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing villain cards '{villain_raw}': {exc}\n")
+        return 2
+
+    try:
+        board_cards = parse_cards_flexible(board_raw)
+        if len(board_cards) not in (3, 4):
+            sys.stderr.write(f"Error: Board must contain 3 (flop) or 4 (turn) cards, got {len(board_cards)}.\n")
+            return 2
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing board cards '{board_raw}': {exc}\n")
+        return 2
+
+    dead_cards = []
+    if getattr(args, "dead", None):
+        try:
+            dead_cards = parse_cards_flexible(args.dead)
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing dead cards '{args.dead}': {exc}\n")
+            return 2
+
+    try:
+        res = poker_equity.calculate_outs(
+            hero=hero_cards,
+            villain=villain_cards,
+            board=board_cards,
+            dead=dead_cards,
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error calculating outs: {exc}\n")
+        return 2
+
     street = "flop" if len(board_cards) == 3 else "turn"
+    cards_to_come = 2 if street == "flop" else 1
     equity = poker_equity.outs_to_equity(res.total_outs, street=street, method=args.method)
+    rule_2 = res.rule_of_2
+    rule_4 = res.rule_of_4
+    rule_4_adj = poker_equity.rule_of_4(res.total_outs, adjusted=True)
+    exact_1 = res.exact_turn_equity
+    exact_2 = res.exact_river_equity
 
     if args.json:
         data = {
+            "hero": cards_to_str(hero_cards),
+            "villain": cards_to_str(villain_cards),
+            "board": cards_to_str(board_cards),
+            "dead": cards_to_str(dead_cards) if dead_cards else None,
+            "street": street,
+            "cards_to_come": cards_to_come,
+            "hero_hand": res.hero_current_result.description,
+            "villain_hand": res.villain_current_result.description,
+            "is_hero_ahead": res.is_hero_ahead,
             "total_outs": res.total_outs,
             "win_outs": len(res.win_outs),
             "tie_outs": len(res.tie_outs),
+            "unseen_cards": res.unseen_cards,
             "drawing_equity": equity,
             "method": args.method,
+            "rule_of_2_pct": round(rule_2 * 100, 2),
+            "rule_of_4_pct": round(rule_4 * 100, 2),
+            "rule_of_4_adjusted_pct": round(rule_4_adj * 100, 2),
+            "exact_1_card_pct": round(exact_1 * 100, 2),
+            "exact_2_card_pct": round(exact_2 * 100, 2),
             "win_cards": [str(c) for c in res.win_outs],
+            "tie_cards": [str(c) for c in res.tie_outs],
+            "outs_by_rank": {
+                rank.label: [str(c) for c in cards]
+                for rank, cards in res.outs_by_rank.items()
+            },
         }
         print(json.dumps(data, indent=2))
         return 0
 
     print(colorize("Drawing Outs Calculation", Colors.BOLD, use_color))
-    print("=" * 40)
-    print(f"Hero   : {args.hero}")
-    print(f"Villain: {args.villain}")
-    print(f"Board  : {args.board}")
-    print("-" * 40)
-    print(f"Total Outs : {colorize(str(res.total_outs), Colors.GREEN, use_color)}")
+    print("=" * 55)
+    b_colored = format_cards_colored(board_cards, enable=use_color)
+    h_colored = format_cards_colored(hero_cards, enable=use_color)
+    v_colored = format_cards_colored(villain_cards, enable=use_color)
+
+    print(f"Hero   : {args.hero or cards_to_str(hero_cards)} ({h_colored}) - {res.hero_current_result.description}")
+    print(f"Villain: {args.villain or cards_to_str(villain_cards)} ({v_colored}) - {res.villain_current_result.description}")
+    print(f"Board  : {args.board or cards_to_str(board_cards)} ({b_colored}) [{street.upper()}, {cards_to_come} to come]")
+    if dead_cards:
+        print(f"Dead   : {format_cards_colored(dead_cards, enable=use_color)}")
+
+    if res.is_hero_ahead:
+        status_str = colorize("Hero is currently AHEAD", Colors.GREEN, use_color)
+    elif res.hero_current_result == res.villain_current_result:
+        status_str = colorize("Hands are currently TIED", Colors.YELLOW, use_color)
+    else:
+        status_str = colorize("Hero is currently TRAILING", Colors.RED, use_color)
+    print(f"Status : {status_str}")
+    print("-" * 55)
+
+    print(f"Total Outs : {colorize(str(res.total_outs), Colors.GREEN, use_color)} ({len(res.win_outs)} win, {len(res.tie_outs)} tie)")
     print(f"Equity ({args.method}): {colorize(f'{equity * 100:.2f}%', Colors.CYAN, use_color)}")
+
     if res.win_outs:
         outs_str = cards_to_str(res.win_outs[:12])
         ellipsis = "..." if len(res.win_outs) > 12 else ""
         print(f"Outs Cards : {outs_str}{ellipsis}")
+
+    print("-" * 55)
+    print(colorize("Equity Projections:", Colors.BOLD, use_color))
+    if street == "flop":
+        print(f"  Exact (Turn or River) : {exact_2 * 100:5.2f}%")
+        print(f"  Exact (Turn only)     : {exact_1 * 100:5.2f}%")
+        print(f"  Rule of 4 (Standard)  : {rule_4 * 100:5.1f}%")
+        if res.total_outs > 8:
+            print(f"  Rule of 4 (Adjusted)  : {rule_4_adj * 100:5.1f}%")
+    else:
+        print(f"  Exact (River)         : {exact_1 * 100:5.2f}%")
+        print(f"  Rule of 2 (Standard)  : {rule_2 * 100:5.1f}%")
+
+    if res.outs_by_rank:
+        print("-" * 55)
+        print(colorize("Winning Outs by Made Hand:", Colors.BOLD, use_color))
+        for rank in sorted(res.outs_by_rank.keys(), reverse=True):
+            cards = res.outs_by_rank[rank]
+            c_str = format_cards_colored(cards, enable=use_color)
+            print(f"  {rank.label:<16} ({len(cards):2d} out{'s' if len(cards) > 1 else ''}): {c_str}")
+
+    if res.tie_outs:
+        c_str = format_cards_colored(res.tie_outs, enable=use_color)
+        print(f"  Tie/Split Outs   ({len(res.tie_outs):2d} out{'s' if len(res.tie_outs) > 1 else ''}): {c_str}")
 
     return 0
 
