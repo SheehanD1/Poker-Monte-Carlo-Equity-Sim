@@ -859,22 +859,27 @@ def create_parser() -> argparse.ArgumentParser:
     p_dec = subparsers.add_parser(
         "decision",
         parents=[common_parser],
-        help="Strategic decision recommendation (Fold, Call, Raise).",
-        description="Recommends the highest EV action based on equity, pot odds, and fold equity.",
+        help="Strategic decision recommendation (Fold, Check, Call, Bet, Raise, All-In).",
+        description="Recommends the highest EV action based on equity, pot odds, fold equity, and stack size.",
+    )
+    p_dec.add_argument(
+        "numbers",
+        nargs="*",
+        help="Positional arguments: <equity> <pot> [<call>] [<stack>] OR <hero> <villain> [<board>].",
     )
     p_dec.add_argument(
         "--equity",
         "-e",
-        type=float,
-        required=True,
-        help="Hero equity (0.0 to 1.0 or percentage).",
+        type=str,
+        default=None,
+        help="Hero equity as a fraction (0.0 to 1.0) or percentage (e.g. '35%%' or '0.35').",
     )
     p_dec.add_argument(
         "--pot",
         "-p",
         type=float,
-        required=True,
-        help="Current pot size.",
+        default=None,
+        help="Current pot size before calling.",
     )
     p_dec.add_argument(
         "--call",
@@ -893,9 +898,63 @@ def create_parser() -> argparse.ArgumentParser:
     p_dec.add_argument(
         "--fold-equity",
         "-fe",
+        type=str,
+        default=None,
+        help="Estimated fold equity (0.0 to 1.0 or percentage, e.g. '20%%').",
+    )
+    p_dec.add_argument(
+        "--raise-size",
+        "-r",
+        type=float,
+        default=None,
+        help="Explicit bet or raise size in chips.",
+    )
+    p_dec.add_argument(
+        "--future-bets",
+        "-f",
         type=float,
         default=0.0,
-        help="Estimated fold equity (0.0 to 1.0).",
+        help="Anticipated future chips won on later streets (implied odds).",
+    )
+    p_dec.add_argument(
+        "--hero",
+        "-H",
+        type=str,
+        default=None,
+        help="Hero hole cards if simulating equity directly (e.g. 'Ah Kh').",
+    )
+    p_dec.add_argument(
+        "--villain",
+        "-V",
+        type=str,
+        default=None,
+        help="Villain hole cards if simulating equity directly (e.g. 'Qc Qd').",
+    )
+    p_dec.add_argument(
+        "--board",
+        "-b",
+        type=str,
+        default=None,
+        help="Community cards if simulating equity directly (e.g. '2h 7h 8c').",
+    )
+    p_dec.add_argument(
+        "--sims",
+        "-n",
+        type=int,
+        default=5000,
+        help="Simulations count when estimating equity from hands (default: 5000).",
+    )
+    p_dec.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed for deterministic equity simulation.",
+    )
+    p_dec.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Prompt interactively for decision parameters.",
     )
 
     # ---------------------------------------------------------------------
@@ -2122,17 +2181,196 @@ def handle_outs_command(args: argparse.Namespace, use_color: bool = True) -> int
 
 
 def handle_decision_command(args: argparse.Namespace, use_color: bool = True) -> int:
-    """Execute the 'decision' subcommand."""
-    eq = args.equity
-    if eq > 1.0:
-        eq = eq / 100.0
+    """Execute the 'decision' subcommand for strategic action recommendations.
+
+    Recommends the mathematically optimal action (Fold, Check, Call, Bet, Raise,
+    or All-In) based on expected value (EV), pot odds, fold equity, stack size,
+    and implied odds.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    use_color : bool, default=True
+        Whether ANSI color formatting is enabled.
+
+    Returns
+    -------
+    int
+        Exit status code (0 for success, non-zero for error).
+
+    Examples
+    --------
+    >>> import argparse
+    >>> from poker_equity.cli import handle_decision_command
+    >>> args = argparse.Namespace(
+    ...     numbers=["0.35", "150", "50"], equity=None, pot=None, call=0.0,
+    ...     stack=None, fold_equity=None, raise_size=None, future_bets=0.0,
+    ...     hero=None, villain=None, board=None, sims=5000, seed=None,
+    ...     interactive=False, json=True
+    ... )
+    >>> handle_decision_command(args, use_color=False)
+    0
+    """
+    raw_equity = args.equity
+    pot = args.pot
+    call = args.call if args.call is not None else 0.0
+    stack = args.stack
+    raw_fe = args.fold_equity
+    raise_size = args.raise_size
+    future_bets = getattr(args, "future_bets", 0.0) or 0.0
+    hero_raw = args.hero
+    villain_raw = args.villain
+    board_raw = args.board
+    numbers = getattr(args, "numbers", []) or []
+
+    # Positional argument resolution
+    if numbers:
+        # Check if first positional argument is a hand rather than a number
+        first_token = numbers[0].strip()
+        is_first_num = False
+        try:
+            parse_equity_value(first_token)
+            is_first_num = True
+        except ValueError:
+            is_first_num = False
+
+        if not is_first_num:
+            # Positional cards mode: <hero> <villain> [<board>]
+            if hero_raw is None and len(numbers) >= 1:
+                hero_raw = numbers[0]
+            if villain_raw is None and len(numbers) >= 2:
+                villain_raw = numbers[1]
+            if board_raw is None and len(numbers) >= 3:
+                board_raw = numbers[2]
+        else:
+            # Positional math mode: <equity> <pot> [<call>] [<stack>]
+            if raw_equity is None and len(numbers) >= 1:
+                raw_equity = numbers[0]
+            if pot is None and len(numbers) >= 2:
+                try:
+                    pot = float(numbers[1])
+                except ValueError:
+                    sys.stderr.write(f"Error: Invalid pot size '{numbers[1]}'. Must be a number.\n")
+                    return 2
+            if call == 0.0 and len(numbers) >= 3:
+                try:
+                    call = float(numbers[2])
+                except ValueError:
+                    sys.stderr.write(f"Error: Invalid bet to call '{numbers[2]}'. Must be a number.\n")
+                    return 2
+            if stack is None and len(numbers) >= 4:
+                try:
+                    stack = float(numbers[3])
+                except ValueError:
+                    sys.stderr.write(f"Error: Invalid stack size '{numbers[3]}'. Must be a number.\n")
+                    return 2
+
+    # Interactive prompt if requested or in interactive tty with no arguments
+    if getattr(args, "interactive", False) or (
+        raw_equity is None and pot is None and hero_raw is None and not numbers and sys.stdin.isatty()
+    ):
+        try:
+            pot_str = input("Current pot size: ").strip()
+            pot = float(pot_str)
+            call_str = input("Bet to call (Enter for 0.0 / Check): ").strip()
+            call = float(call_str) if call_str else 0.0
+            eq_str = input("Hero equity (e.g. '35%' or '0.35', or Enter to specify hands): ").strip()
+            if eq_str:
+                raw_equity = eq_str
+            else:
+                hero_raw = input("Hero cards (e.g. 'Ah Kh'): ").strip()
+                villain_raw = input("Villain cards (e.g. 'Qc Qd'): ").strip()
+                board_raw = input("Board cards (optional, e.g. '2h 7h 8c'): ").strip() or None
+            stack_str = input("Hero stack size (optional, Enter to skip): ").strip()
+            if stack_str:
+                stack = float(stack_str)
+            fe_str = input("Fold equity estimate (optional, e.g. '20%', Enter for 0%): ").strip()
+            if fe_str:
+                raw_fe = fe_str
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\nDecision calculation cancelled.\n")
+            return 1
+        except Exception as exc:
+            sys.stderr.write(f"Error reading inputs: {exc}\n")
+            return 2
+
+    # Parse or simulate equity
+    equity: float | None = None
+    hero_cards = None
+    villain_cards = None
+    board_cards = None
+
+    if raw_equity is not None:
+        try:
+            equity = parse_equity_value(raw_equity)
+            if not (0.0 <= equity <= 1.0):
+                sys.stderr.write(f"Error: Equity must be between 0.0 and 1.0 (or 0% and 100%), got {raw_equity}.\n")
+                return 2
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing equity '{raw_equity}': {exc}\n")
+            return 2
+    elif hero_raw and villain_raw:
+        try:
+            hero_cards = parse_cards_flexible(hero_raw)
+            if len(hero_cards) != 2:
+                sys.stderr.write(f"Error: Hero must have exactly 2 cards, got {len(hero_cards)}.\n")
+                return 2
+            villain_cards = parse_cards_flexible(villain_raw)
+            if len(villain_cards) != 2:
+                sys.stderr.write(f"Error: Villain must have exactly 2 cards, got {len(villain_cards)}.\n")
+                return 2
+            board_cards = parse_cards_flexible(board_raw) if board_raw else []
+            sim_res = poker_equity.calculate_equity(
+                hero=hero_cards,
+                villain=villain_cards,
+                board=board_cards,
+                num_sims=args.sims,
+                seed=args.seed,
+            )
+            equity = sim_res.equity
+        except Exception as exc:
+            sys.stderr.write(f"Error calculating hand equity: {exc}\n")
+            return 2
+    else:
+        sys.stderr.write(
+            "Error: Must specify hero equity (e.g. '--equity 35%' or '0.35 150 50') "
+            "or hole cards (e.g. '--hero AhKh --villain QcQd').\n"
+        )
+        return 2
+
+    if pot is None:
+        sys.stderr.write("Error: Must specify pot size (e.g. '--pot 150' or '0.35 150 50').\n")
+        return 2
+
+    if pot < 0 or call < 0:
+        sys.stderr.write("Error: Pot size and bet to call must be non-negative.\n")
+        return 2
+
+    if stack is not None and stack < 0:
+        sys.stderr.write("Error: Stack size cannot be negative.\n")
+        return 2
+
+    # Fold equity parsing
+    fold_equity = 0.0
+    if raw_fe is not None:
+        try:
+            fold_equity = parse_equity_value(raw_fe)
+            if not (0.0 <= fold_equity <= 1.0):
+                sys.stderr.write(f"Error: Fold equity must be between 0.0 and 1.0, got {raw_fe}.\n")
+                return 2
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing fold equity '{raw_fe}': {exc}\n")
+            return 2
 
     res = poker_equity.recommend_decision(
-        equity=eq,
-        pot_size=args.pot,
-        bet_to_call=args.call,
-        stack_size=args.stack,
-        fold_equity=args.fold_equity,
+        equity=equity,
+        pot_size=pot,
+        bet_to_call=call,
+        stack_size=stack,
+        fold_equity=fold_equity,
+        raise_size=raise_size,
+        future_bets=future_bets,
     )
 
     if args.json:
@@ -2141,18 +2379,71 @@ def handle_decision_command(args: argparse.Namespace, use_color: bool = True) ->
             "ev": res.ev,
             "equity": res.equity,
             "pot_odds": res.pot_odds,
+            "pot_size": res.pot_size,
+            "bet_to_call": res.bet_to_call,
+            "stack_size": stack,
+            "raise_size": res.raise_size,
+            "fold_equity": res.fold_equity,
+            "future_bets": future_bets,
+            "is_profitable": res.is_profitable,
+            "ev_difference": res.ev_difference,
+            "alternative_action": res.alternative_action.value if res.alternative_action else None,
             "ev_by_action": {k.value: v for k, v in res.ev_by_action.items()},
             "reasoning": res.reasoning,
+            "spr": round(stack / pot, 2) if (stack is not None and pot > 0) else None,
         }
+        if hero_cards and villain_cards:
+            data["hero"] = cards_to_str(hero_cards)
+            data["villain"] = cards_to_str(villain_cards)
+            data["board"] = cards_to_str(board_cards) if board_cards else None
         print(json.dumps(data, indent=2))
         return 0
 
     col = Colors.GREEN if res.is_profitable else Colors.YELLOW
+    print(colorize("Strategic Decision Recommendation", Colors.BOLD, use_color))
+    print("=" * 64)
     print(colorize(f"Recommended Action: {res.action}", col, use_color))
-    print(f"Expected Value    : {res.ev:+.2f} chips")
+    print(f"Expected Value    : {colorize(f'{res.ev:+.2f} chips', col, use_color)}")
     print(f"Hero Equity       : {res.equity * 100:.1f}%")
-    print(f"Pot Odds          : {res.pot_odds * 100:.1f}%")
-    print("-" * 40)
+    pot_odds_str = f"{res.pot_odds * 100:.1f}%" if res.bet_to_call > 0 else "0.0% (Free check)"
+    print(f"Pot Odds          : {pot_odds_str}")
+    print(f"Pot Size          : {res.pot_size:.2f} chips (Cost to Call: {res.bet_to_call:.2f})")
+    if stack is not None:
+        spr_str = f"{stack / pot:.2f}" if pot > 0 else "N/A"
+        print(f"Hero Stack        : {stack:.2f} chips (SPR: {spr_str})")
+    if res.raise_size is not None:
+        print(f"Suggested Sizing  : {res.raise_size:.2f} chips")
+    if res.fold_equity > 0:
+        print(f"Fold Equity       : {res.fold_equity * 100:.1f}%")
+    if future_bets > 0:
+        print(f"Future Bets (Imp) : +{future_bets:.2f} chips")
+    if hero_cards and villain_cards:
+        h_disp = format_cards_colored(hero_cards, enable=use_color)
+        v_disp = format_cards_colored(villain_cards, enable=use_color)
+        b_disp = format_cards_colored(board_cards, enable=use_color) if board_cards else "None (Preflop)"
+        print(f"Hole Cards        : Hero {h_disp} vs Villain {v_disp} | Board: {b_disp}")
+    print("-" * 64)
+
+    # EV Comparison Table
+    print(colorize("Action Expected Value (EV) Comparison:", Colors.BOLD, use_color))
+    print(f"{'Action':<10} {'EV (chips)':<14} {'Delta vs Best':<16} {'Status':<16}")
+    print("-" * 64)
+    sorted_actions = sorted(res.ev_by_action.items(), key=lambda item: item[1], reverse=True)
+    best_ev = res.ev
+    for act, act_ev in sorted_actions:
+        delta = act_ev - best_ev
+        delta_str = "  0.00" if abs(delta) < 1e-4 else f"{delta:+6.2f}"
+        if act == res.action:
+            status = colorize("★ Recommended", col, use_color)
+            act_label = colorize(act.value.upper(), col, use_color)
+        elif res.alternative_action == act:
+            status = colorize("◆ Viable Line", Colors.CYAN, use_color)
+            act_label = act.value.upper()
+        else:
+            status = "Suboptimal"
+            act_label = act.value.upper()
+        print(f"{pad_visible(act_label, 10)} {act_ev:+10.2f} chips   {delta_str:<16} {status}")
+    print("-" * 64)
     print(f"Analysis: {res.reasoning}")
     return 0
 

@@ -780,6 +780,192 @@ class TestCliDecisionCommand:
         assert data["recommended_action"] == "call"
         assert data["ev"] == pytest.approx(20.0)
 
+    def test_decision_positional_arguments(self, capsys):
+        """Positional <equity> <pot> <call> syntax."""
+        code = main(["decision", "0.35", "150", "50"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action: CALL" in captured.out
+        assert "+20.00 chips" in captured.out
+
+    def test_decision_percentage_equity(self, capsys):
+        """Equity passed as percentage string."""
+        code = main(["decision", "--equity", "35%", "--pot", "150", "--call", "50"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Hero Equity       : 35.0%" in captured.out
+        assert "+20.00 chips" in captured.out
+
+    def test_decision_checking_spot_default_call_zero(self, capsys):
+        """Checking spot defaults --call to 0.0."""
+        code = main(["decision", "--equity", "0.70", "--pot", "100"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action: BET" in captured.out
+        assert "Free check" in captured.out
+
+    def test_decision_checking_spot_check_recommendation(self, capsys):
+        """Low equity in unraised pot recommends CHECK."""
+        code = main(["decision", "--equity", "0.20", "--pot", "100"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action: CHECK" in captured.out
+
+    def test_decision_fold_recommendation(self, capsys):
+        """Negative EV call recommends FOLD."""
+        code = main(["decision", "--equity", "0.10", "--pot", "150", "--call", "50"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action: FOLD" in captured.out
+        assert "0.00 chips" in captured.out
+
+    def test_decision_raise_recommendation_with_fold_equity(self, capsys):
+        """High equity with fold equity recommends RAISE."""
+        code = main([
+            "decision",
+            "--equity", "0.60",
+            "--pot", "100",
+            "--call", "20",
+            "--fold-equity", "30%",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action: RAISE" in captured.out
+        assert "Fold Equity       : 30.0%" in captured.out
+
+    def test_decision_all_in_recommendation_short_stack(self, capsys):
+        """Short stack commits all chips for ALL_IN action."""
+        code = main([
+            "decision",
+            "--equity", "0.80",
+            "--pot", "100",
+            "--call", "20",
+            "--stack", "30",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action: ALL_IN" in captured.out
+        assert "Hero Stack        : 30.00 chips" in captured.out
+
+    def test_decision_hand_simulation_mode(self, capsys):
+        """Simulate equity from hero, villain, and board cards."""
+        code = main([
+            "decision",
+            "--hero", "AhKh",
+            "--villain", "QcQd",
+            "--board", "2h 7h 8c",
+            "--pot", "150",
+            "--call", "50",
+            "--sims", "1000",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Strategic Decision Recommendation" in captured.out
+        assert "Hole Cards" in captured.out
+        assert "Recommended Action:" in captured.out
+
+    def test_decision_positional_hands_simulation(self, capsys):
+        """Simulate equity with positional hands syntax."""
+        code = main([
+            "decision", "AhKh", "QcQd", "2h 7h 8c",
+            "-p", "150",
+            "-c", "50",
+            "-n", "1000",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommended Action:" in captured.out
+        assert "Hole Cards" in captured.out
+
+    def test_decision_with_future_bets_implied_odds(self, capsys):
+        """Implied odds via --future-bets improves call EV."""
+        code = main([
+            "decision",
+            "--equity", "0.20",
+            "--pot", "150",
+            "--call", "50",
+            "--future-bets", "100",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Future Bets (Imp) : +100.00 chips" in captured.out
+
+    def test_decision_ev_comparison_table_display(self, capsys):
+        """Verify EV comparison table displays all evaluated actions."""
+        code = main(["decision", "--equity", "0.35", "--pot", "150", "--call", "50"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Action Expected Value (EV) Comparison:" in captured.out
+        assert "★ Recommended" in captured.out
+        assert "CALL" in captured.out
+        assert "FOLD" in captured.out
+
+    def test_decision_json_comprehensive(self, capsys):
+        """Comprehensive JSON output with stack, fold equity, and SPR."""
+        code = main([
+            "decision", "0.35", "150", "50", "300",
+            "-fe", "25%",
+            "-f", "50",
+            "--json",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["recommended_action"] == "raise"
+        assert data["equity"] == 0.35
+        assert data["pot_odds"] == 0.25
+        assert data["pot_size"] == 150.0
+        assert data["bet_to_call"] == 50.0
+        assert data["stack_size"] == 300.0
+        assert data["fold_equity"] == 0.25
+        assert data["future_bets"] == 50.0
+        assert data["is_profitable"] is True
+        assert data["spr"] == 2.0
+        assert "fold" in data["ev_by_action"]
+        assert "call" in data["ev_by_action"]
+        assert "reasoning" in data
+
+    def test_decision_missing_equity_and_hands_error(self, capsys):
+        """Missing equity and cards returns exit code 2."""
+        code = main(["decision", "--pot", "150"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Must specify hero equity" in captured.err
+
+    def test_decision_missing_pot_error(self, capsys):
+        """Missing pot size returns exit code 2."""
+        code = main(["decision", "--equity", "0.35"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Must specify pot size" in captured.err
+
+    def test_decision_negative_pot_error(self, capsys):
+        """Negative pot returns exit code 2."""
+        code = main(["decision", "--equity", "0.35", "--pot", "-100"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Pot size and bet to call must be non-negative" in captured.err
+
+    def test_decision_invalid_equity_error(self, capsys):
+        """Invalid equity returns exit code 2."""
+        code = main(["decision", "--equity", "120%", "--pot", "100"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Equity must be between 0.0 and 1.0" in captured.err
+
+    def test_decision_interactive_mode(self, monkeypatch, capsys):
+        """Interactive input mode prompts for decision parameters."""
+        inputs = iter(["150", "50", "35%", "200", "0%"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+        code = main(["decision", "--interactive"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Strategic Decision Recommendation" in captured.out
+        assert "Recommended Action: CALL" in captured.out
+        assert "+20.00 chips" in captured.out
+
 
 class TestCliTableCommand:
     """Tests for 'table' subcommand."""
