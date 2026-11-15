@@ -309,6 +309,14 @@ class GameState:
             active_not_all_in = [p for p in self.active_players if not p.is_all_in]
             if len(active_not_all_in) <= 1 and len(self.history) > 0:
                 return True
+            river_actions = [r for r in self.history if r.street == Street.RIVER]
+            if river_actions:
+                acted = {r.player_id for r in river_actions}
+                if all(
+                    p.player_id in acted and p.current_bet == self.current_bet
+                    for p in active_not_all_in
+                ):
+                    return True
         return False
 
     @property

@@ -996,6 +996,289 @@ class TestCliTableCommand:
         assert data["big_blind"] == 2.0
         assert len(data["players"]) == 2
 
+    def test_table_custom_stacks_and_cards(self, capsys):
+        """Custom player stacks and cards display properly."""
+        code = main([
+            "table",
+            "--blinds", "2/5",
+            "--hero-stack", "500",
+            "--villain-stack", "400",
+            "--hero-cards", "Ah As",
+            "--villain-cards", "Kh Ks",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Ah As" in captured.out
+        assert "Kh Ks" in captured.out
+        assert "Blinds: 2/5" in captured.out
+
+    def test_table_with_board_flop_turn_river(self, capsys):
+        """Pre-set board cards configure flop, turn, and river states."""
+        # Flop (3 cards)
+        code3 = main(["table", "--blinds", "1/2", "--board", "Ah Kh Qh"])
+        assert code3 == 0
+        out3 = capsys.readouterr().out
+        assert "FLOP" in out3
+        assert "Ah Kh Qh" in out3
+
+        # Turn (4 cards)
+        code4 = main(["table", "--blinds", "1/2", "--board", "Ah Kh Qh Jh"])
+        assert code4 == 0
+        out4 = capsys.readouterr().out
+        assert "TURN" in out4
+
+        # River (5 cards)
+        code5 = main(["table", "--blinds", "1/2", "--board", "Ah Kh Qh Jh Th"])
+        assert code5 == 0
+        out5 = capsys.readouterr().out
+        assert "RIVER" in out5
+
+    def test_table_invalid_board_count(self, capsys):
+        """Providing invalid number of board cards returns error code 2."""
+        code = main(["table", "--blinds", "1/2", "--board", "Ah Kh"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Board must have 3, 4, or 5 cards, got 2" in captured.err
+
+    def test_table_hero_is_bb(self, capsys):
+        """--hero-is-bb assigns Hero to BB and Villain to BTN."""
+        code = main(["table", "--blinds", "1/2", "--hero-is-bb"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Hero" in captured.out
+        assert "Villain" in captured.out
+
+    def test_table_with_ante(self, capsys):
+        """Posting ante collects chips into main pot before action."""
+        code = main(["table", "--blinds", "1/2", "--ante", "0.5", "--json"])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["ante"] == 0.5
+        assert data["total_pot"] == 4.0  # 1 (SB) + 2 (BB) + 0.5*2 (antes)
+
+    def test_table_scripted_actions_call_check(self, capsys):
+        """Pre-scripted actions 'call,check' complete preflop and advance to Flop."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--actions", "call,check",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Advancing to FLOP" in captured.out
+        assert "FLOP" in captured.out
+
+    def test_table_scripted_actions_fold(self, capsys):
+        """Pre-scripted fold action ends the hand uncontested."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--actions", "fold",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Hand Result:" in captured.out
+        assert "uncontested" in captured.out
+
+    def test_table_scripted_actions_invalid_action(self, capsys):
+        """Unknown action in scripted actions returns error code 2."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--actions", "fly_to_moon",
+        ])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error applying action 'fly_to_moon'" in captured.err
+
+    def test_table_scripted_actions_illegal_check(self, capsys):
+        """Illegal check facing big blind returns error code 2."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--actions", "check",
+        ])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "is not legal here" in captured.err
+
+    def test_table_scripted_actions_allin_runout_and_showdown(self, capsys):
+        """All-in preflop followed by call runs out board to river with showdown."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--hero-stack", "50",
+            "--villain-stack", "50",
+            "--hero-cards", "Ah As",
+            "--villain-cards", "Kh Ks",
+            "--actions", "allin,call",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Dealing FLOP" in captured.out
+        assert "Dealing TURN" in captured.out
+        assert "Dealing RIVER" in captured.out
+        assert "Showdown:" in captured.out
+        assert "Main Pot" in captured.out
+
+    def test_table_recommendation_flag(self, capsys):
+        """--recommend flag shows live action recommendation for current player."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--hero-cards", "Ah As",
+            "--villain-cards", "Kh Ks",
+            "--recommend",
+            "--sims", "200",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Recommendation for Hero" in captured.out
+
+    def test_table_recommendation_requires_known_cards(self, capsys):
+        """Recommendation without known cards displays explanatory note."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--recommend",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        # Should not crash, displays summary
+        assert "Table State - PREFLOP" in captured.out
+
+    def test_table_interactive_fold(self, monkeypatch, capsys):
+        """Interactive REPL mode exits when player folds."""
+        inputs = iter(["fold"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        code = main(["table", "--blinds", "1/2", "-i"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Interactive Table Simulator" in captured.out
+        assert "Hand Complete" in captured.out
+        assert "uncontested" in captured.out
+
+    def test_table_interactive_call_check_through(self, monkeypatch, capsys):
+        """Interactive REPL mode check-through to river showdown."""
+        # Hero calls preflop, Villain checks
+        # Flop: check, check
+        # Turn: check, check
+        # River: check, check
+        inputs = iter([
+            "call", "check",
+            "check", "check",
+            "check", "check",
+            "check", "check",
+        ])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--hero-cards", "Ah As",
+            "--villain-cards", "Kh Ks",
+            "-i",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Advancing to FLOP" in captured.out
+        assert "Advancing to TURN" in captured.out
+        assert "Advancing to RIVER" in captured.out
+        assert "Hand Complete" in captured.out
+        assert "Showdown:" in captured.out
+
+    def test_table_interactive_meta_commands(self, monkeypatch, capsys):
+        """Interactive REPL handles help, state, history, recommend, and quit."""
+        inputs = iter([
+            "help",
+            "state",
+            "history",
+            "recommend",
+            "quit",
+        ])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--hero-cards", "Ah As",
+            "--villain-cards", "Kh Ks",
+            "-i",
+            "--sims", "200",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Interactive Table Commands:" in captured.out
+        assert "Table State - PREFLOP" in captured.out
+        assert "Recommendation for Hero" in captured.out
+        assert "Exiting table simulator." in captured.out
+
+    def test_table_interactive_manual_deal(self, monkeypatch, capsys):
+        """Interactive REPL supports manual 'deal <cards>' meta-command."""
+        inputs = iter([
+            "deal 7s 8s 9s",
+            "state",
+            "quit",
+        ])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        code = main(["table", "--blinds", "1/2", "-i"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Added board cards: 7s 8s 9s" in captured.out
+        assert "7s 8s 9s" in captured.out
+
+    def test_table_interactive_invalid_action_reprompt(self, monkeypatch, capsys):
+        """Entering invalid action prints error and reprompts until valid action."""
+        inputs = iter([
+            "fly_away",
+            "check",  # illegal preflop facing bet
+            "call",
+            "quit",
+        ])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        code = main(["table", "--blinds", "1/2", "-i"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Error: Unknown action 'fly_away'" in captured.out
+        assert "Action 'check' is not legal here" in captured.out
+        assert "hero: CALL" in captured.out
+
+    def test_table_interactive_eof_exit(self, monkeypatch, capsys):
+        """EOF (Ctrl+D) in interactive mode exits cleanly."""
+        def raise_eof(prompt):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", raise_eof)
+
+        code = main(["table", "--blinds", "1/2", "-i"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Exiting table simulator." in captured.out
+
+    def test_table_side_pot_display(self, capsys):
+        """Unequal stack all-in correctly creates and displays side pots."""
+        code = main([
+            "table",
+            "--blinds", "1/2",
+            "--hero-stack", "50",
+            "--villain-stack", "100",
+            "--actions", "allin,call",
+            "--json",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["pots"]) >= 1
+
 
 class TestCliCurveCommand:
     """Tests for 'curve' subcommand."""

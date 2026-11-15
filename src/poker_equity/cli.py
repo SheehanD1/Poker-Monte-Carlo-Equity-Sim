@@ -16,9 +16,11 @@ import time
 from typing import Any, Callable, Sequence
 
 import poker_equity
+import poker_equity.decision
 from poker_equity.breakdown import range_vs_hand_breakdown
 from poker_equity.card import Card, Rank, Suit
 from poker_equity.constants import cards_to_str, parse_cards
+from poker_equity.deck import Deck
 from poker_equity.evaluator import evaluate_hand
 from poker_equity.parallel import calculate_equities_parallel
 from poker_equity.presets import PRESET_RANGES, get_preset_range, top_percent_range
@@ -963,8 +965,12 @@ def create_parser() -> argparse.ArgumentParser:
     p_tbl = subparsers.add_parser(
         "table",
         parents=[common_parser],
-        help="Create and display a poker table game state.",
-        description="Inspect table state, blinds, stacks, positions, and SPR.",
+        help="Create and simulate an interactive poker table.",
+        description=(
+            "Interactive table simulator with betting rounds, side pots, "
+            "and live decision recommendations. Use --interactive (-i) "
+            "to step through betting actions in a REPL loop."
+        ),
     )
     p_tbl.add_argument(
         "--blinds",
@@ -995,6 +1001,60 @@ def create_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Villain hole cards (e.g. 'Kh Ks').",
+    )
+    p_tbl.add_argument(
+        "--board",
+        type=str,
+        default=None,
+        help="Pre-set community cards (e.g. 'Ah Kh Qh' for flop).",
+    )
+    p_tbl.add_argument(
+        "--ante",
+        type=float,
+        default=0.0,
+        help="Ante per player (default: 0).",
+    )
+    p_tbl.add_argument(
+        "--hero-is-bb",
+        action="store_true",
+        default=False,
+        help="Place Hero in the BB (default: Hero is BTN/SB).",
+    )
+    p_tbl.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        default=False,
+        help="Enter interactive REPL mode to play betting actions.",
+    )
+    p_tbl.add_argument(
+        "--actions",
+        type=str,
+        default=None,
+        help=(
+            "Pre-scripted action sequence separated by commas "
+            "(e.g. 'call,check,check,bet 6,call'). "
+            "Applied before entering interactive mode or displaying state."
+        ),
+    )
+    p_tbl.add_argument(
+        "--recommend",
+        action="store_true",
+        default=False,
+        help="Show live decision recommendations at each action point.",
+    )
+    p_tbl.add_argument(
+        "--sims",
+        type=int,
+        default=2000,
+        help="Monte Carlo simulations for equity/recommendation (default: 2000).",
+    )
+    p_tbl.add_argument(
+        "--seed",
+        "-s",
+        type=int,
+        default=None,
+        help="RNG seed for deterministic deck dealing and equity simulation.",
     )
 
     # ---------------------------------------------------------------------
@@ -2448,14 +2508,43 @@ def handle_decision_command(args: argparse.Namespace, use_color: bool = True) ->
     return 0
 
 
-def handle_table_command(args: argparse.Namespace, use_color: bool = True) -> int:
-    """Execute the 'table' subcommand."""
+def handle_table_command(
+    args: argparse.Namespace,
+    use_color: bool = True,
+    input_fn: Callable[[str], str] | None = None,
+) -> int:
+    """Execute the 'table' subcommand with optional interactive simulation.
+
+    Supports static table display, pre-scripted action sequences, and
+    fully interactive REPL mode with live decision recommendations,
+    side pot tracking, community card dealing, and hand history display.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments including blinds, stacks, cards, board,
+        interactive flag, actions, seed, and recommendation settings.
+    use_color : bool, default=True
+        Whether to use ANSI terminal colors in output.
+    input_fn : Callable[[str], str] | None, default=None
+        Custom input callable for testing or headless execution.
+
+    Returns
+    -------
+    int
+        Exit status code (0 for success, non-zero for error).
+    """
     blinds_parts = args.blinds.split("/")
     if len(blinds_parts) != 2:
         sys.stderr.write("Error: Blinds must be in 'SB/BB' format (e.g. '1/2').\n")
         return 2
 
-    sb, bb = float(blinds_parts[0]), float(blinds_parts[1])
+    try:
+        sb, bb = float(blinds_parts[0]), float(blinds_parts[1])
+    except ValueError:
+        sys.stderr.write("Error: Blinds must be in 'SB/BB' format (e.g. '1/2').\n")
+        return 2
+
     table = poker_equity.GameState.create_heads_up(
         small_blind=sb,
         big_blind=bb,
@@ -2463,14 +2552,724 @@ def handle_table_command(args: argparse.Namespace, use_color: bool = True) -> in
         villain_stack=args.villain_stack,
         hero_cards=args.hero_cards,
         villain_cards=args.villain_cards,
+        hero_is_btn=not args.hero_is_bb,
+        ante=args.ante,
     )
 
+    # Pre-set board cards if provided
+    if args.board:
+        board_cards = parse_cards_flexible(args.board)
+        if len(board_cards) == 3:
+            table.deal_flop(board_cards)
+        elif len(board_cards) == 4:
+            table.deal_flop(board_cards[:3])
+            table.deal_turn(board_cards[3])
+        elif len(board_cards) == 5:
+            table.deal_flop(board_cards[:3])
+            table.deal_turn(board_cards[3])
+            table.deal_river(board_cards[4])
+        elif len(board_cards) > 0:
+            sys.stderr.write(
+                f"Error: Board must have 3, 4, or 5 cards, got {len(board_cards)}.\n"
+            )
+            return 2
+
+    seed = getattr(args, "seed", None)
+    deck = _init_deck(table, seed=seed)
+
+    # Apply pre-scripted actions if provided
+    if args.actions:
+        result = _apply_scripted_actions(
+            table, args.actions, use_color, deck=deck, quiet=args.json,
+        )
+        if result != 0:
+            return result
+
+    # JSON output mode (non-interactive)
     if args.json:
         print(json.dumps(table.to_dict(), indent=2))
         return 0
 
-    print(table.summary())
+    # Interactive REPL mode
+    if args.interactive:
+        return _table_interactive_loop(
+            table,
+            use_color=use_color,
+            show_recommend=args.recommend,
+            num_sims=args.sims,
+            seed=seed,
+            deck=deck,
+            input_fn=input_fn,
+        )
+
+    # Static display mode
+    _print_table_state(table, use_color=use_color)
+    if args.recommend and not table.is_hand_over:
+        _print_table_recommendation(
+            table, use_color=use_color, num_sims=args.sims, seed=seed,
+        )
+    if table.is_hand_over:
+        _resolve_showdown(table, use_color=use_color)
     return 0
+
+
+def _init_deck(table: "poker_equity.GameState", seed: int | None = None) -> Deck:
+    """Initialize a deck for the table with known cards removed and shuffled.
+
+    Parameters
+    ----------
+    table : GameState
+        Table containing players and board cards.
+    seed : int | None, default=None
+        RNG seed for deterministic dealing.
+
+    Returns
+    -------
+    Deck
+        Prepared and shuffled Deck instance.
+    """
+    deck = Deck(seed=seed)
+    known = []
+    for p in table.players:
+        if p.cards:
+            known.extend(p.cards)
+    if table.board:
+        known.extend(table.board)
+    if known:
+        deck.remove(known)
+    deck.shuffle()
+    return deck
+
+
+def _parse_action_input(text: str) -> tuple[str, float | None]:
+    """Parse an action string into (action_name, optional_amount).
+
+    Parameters
+    ----------
+    text : str
+        User input like ``"call"``, ``"bet 10"``, ``"raise 25"``, or ``"all-in"``.
+
+    Returns
+    -------
+    tuple[str, float | None]
+        Normalized action name and optional chip amount.
+
+    Examples
+    --------
+    >>> _parse_action_input("bet 10")
+    ('bet', 10.0)
+    >>> _parse_action_input("call")
+    ('call', None)
+    >>> _parse_action_input("all-in")
+    ('all_in', None)
+    """
+    parts = text.strip().lower().split(None, 1)
+    if not parts:
+        return ("", None)
+    action_str = parts[0].replace("-", "_")
+    amount = None
+    if len(parts) > 1:
+        try:
+            amount = float(parts[1])
+        except ValueError:
+            pass
+    return (action_str, amount)
+
+
+def _resolve_action(
+    action_str: str, amount: float | None, table: "poker_equity.GameState",
+) -> tuple["poker_equity.decision.Action", float | None]:
+    """Resolve a text action string to an Action enum and validated amount.
+
+    Parameters
+    ----------
+    action_str : str
+        Normalized action name (e.g. ``"fold"``, ``"bet"``, ``"all_in"``).
+    amount : float | None
+        Optional chip amount for bet/raise actions.
+    table : GameState
+        Current game state for validation context.
+
+    Returns
+    -------
+    tuple[Action, float | None]
+        Resolved Action enum and optional amount.
+
+    Raises
+    ------
+    ValueError
+        If the action string is unrecognized or not legal in the current spot.
+    """
+    action_map = {
+        "fold": poker_equity.decision.Action.FOLD,
+        "f": poker_equity.decision.Action.FOLD,
+        "check": poker_equity.decision.Action.CHECK,
+        "x": poker_equity.decision.Action.CHECK,
+        "call": poker_equity.decision.Action.CALL,
+        "c": poker_equity.decision.Action.CALL,
+        "bet": poker_equity.decision.Action.BET,
+        "b": poker_equity.decision.Action.BET,
+        "raise": poker_equity.decision.Action.RAISE,
+        "r": poker_equity.decision.Action.RAISE,
+        "all_in": poker_equity.decision.Action.ALL_IN,
+        "allin": poker_equity.decision.Action.ALL_IN,
+        "ai": poker_equity.decision.Action.ALL_IN,
+        "jam": poker_equity.decision.Action.ALL_IN,
+        "shove": poker_equity.decision.Action.ALL_IN,
+    }
+
+    if action_str not in action_map:
+        raise ValueError(
+            f"Unknown action '{action_str}'. "
+            f"Valid: fold/f, check/x, call/c, bet/b <amount>, "
+            f"raise/r <amount>, all-in/ai/jam/shove"
+        )
+
+    action = action_map[action_str]
+    legal = table.legal_actions()
+    if action not in legal:
+        legal_strs = [a.value for a in legal]
+        raise ValueError(
+            f"Action '{action.value}' is not legal here. Legal: {', '.join(legal_strs)}"
+        )
+
+    return (action, amount)
+
+
+def _apply_scripted_actions(
+    table: "poker_equity.GameState",
+    actions_str: str,
+    use_color: bool = True,
+    deck: Deck | None = None,
+    quiet: bool = False,
+) -> int:
+    """Apply a comma-separated sequence of pre-scripted actions to the table.
+
+    Parameters
+    ----------
+    table : GameState
+        Mutable game state to apply actions to.
+    actions_str : str
+        Comma-separated action strings (e.g. ``"call,check,bet 10"``).
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    deck : Deck | None, default=None
+        Deck for auto-dealing cards on street transition.
+    quiet : bool, default=False
+        Whether to suppress intermediate print statements (e.g. for JSON output).
+
+    Returns
+    -------
+    int
+        0 on success, 2 on action parsing/validation error.
+    """
+    action_tokens = [a.strip() for a in actions_str.split(",") if a.strip()]
+    for token in action_tokens:
+        if table.is_hand_over:
+            break
+        action_str, amount = _parse_action_input(token)
+        try:
+            action, amt = _resolve_action(action_str, amount, table)
+            table.apply_action(action, amount=amt)
+            _check_street_transition(
+                table, use_color=use_color, deck=deck, quiet=quiet,
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"Error applying action '{token}': {exc}\n")
+            return 2
+    return 0
+
+
+def _print_table_state(
+    table: "poker_equity.GameState",
+    use_color: bool = True,
+) -> None:
+    """Print a formatted table state display to stdout.
+
+    Parameters
+    ----------
+    table : GameState
+        Current game state to display.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    """
+    header = colorize(
+        f"=== Table: {table.street.value} | "
+        f"Blinds {table.small_blind:.0f}/{table.big_blind:.0f} ===",
+        Colors.BOLD + Colors.CYAN, use_color,
+    )
+    print(header)
+    print(table.summary())
+
+    # Show side pots if present
+    if len(table.pots) > 1:
+        print(colorize("\nSide Pots:", Colors.BOLD + Colors.YELLOW, use_color))
+        for idx, pot in enumerate(table.pots):
+            label = "Main Pot" if pot.is_main else f"Side Pot {idx}"
+            eligible = ", ".join(str(pid) for pid in pot.eligible_player_ids)
+            print(f"  {label}: {pot.amount:.2f} chips (eligible: {eligible})")
+
+    # Show hand history if any
+    if table.history:
+        print(colorize("\nHand History:", Colors.BOLD + Colors.DIM, use_color))
+        for rec in table.history:
+            amt_str = f" {rec.amount:.2f}" if rec.amount > 0 else ""
+            ai_str = " [ALL-IN]" if rec.is_all_in else ""
+            print(
+                f"  [{rec.street.value}] {rec.player_id}: "
+                f"{rec.action.value.upper()}{amt_str}{ai_str}"
+            )
+    print()
+
+
+def _print_table_recommendation(
+    table: "poker_equity.GameState",
+    use_color: bool = True,
+    num_sims: int = 2000,
+    seed: int | None = None,
+) -> None:
+    """Print a live decision recommendation for the current player.
+
+    Parameters
+    ----------
+    table : GameState
+        Current game state.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    num_sims : int, default=2000
+        Monte Carlo simulations for equity calculation.
+    seed : int | None, default=None
+        RNG seed for equity calculation.
+    """
+    curr = table.current_player
+    if curr is None or not curr.has_cards:
+        return
+
+    active_with_cards = [p for p in table.active_players if p.has_cards]
+    if len(active_with_cards) < 2:
+        print(colorize(
+            "  (Recommendation requires both players to have known cards)",
+            Colors.DIM, use_color,
+        ))
+        return
+
+    try:
+        result = table.recommend_decision(num_sims=num_sims, seed=seed)
+        rec_color = Colors.GREEN if result.is_profitable else Colors.RED
+        print(colorize(
+            f"  Recommendation for {curr.name}: {result.action.value.upper()} "
+            f"(Equity: {result.equity:.1%}, EV: {result.ev:+.2f})",
+            rec_color, use_color,
+        ))
+    except Exception as exc:
+        print(colorize(
+            f"  (Recommendation unavailable: {exc})",
+            Colors.DIM, use_color,
+        ))
+
+
+def _format_action_prompt(
+    table: "poker_equity.GameState", use_color: bool = True,
+) -> str:
+    """Build the interactive action prompt string showing legal actions.
+
+    Parameters
+    ----------
+    table : GameState
+        Current game state.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+
+    Returns
+    -------
+    str
+        Prompt string listing legal actions for the current player.
+    """
+    curr = table.current_player
+    if curr is None:
+        return ""
+    legal = table.legal_actions()
+    action_labels = []
+    for a in legal:
+        if a.value in ("bet", "raise"):
+            min_r = table.min_legal_raise()
+            action_labels.append(f"{a.value} <amount> (min {min_r:.0f})")
+        else:
+            action_labels.append(a.value)
+
+    call_cost = table.bet_to_call()
+    cost_str = f" | Cost to call: {call_cost:.2f}" if call_cost > 0 else ""
+    player_label = colorize(
+        f"{curr.name} ({curr.position})", Colors.BOLD + Colors.GREEN, use_color,
+    )
+    actions_str = colorize(
+        " | ".join(action_labels), Colors.YELLOW, use_color,
+    )
+    return f"{player_label}{cost_str}\n  Actions: [{actions_str}]\n> "
+
+
+def _table_interactive_loop(
+    table: "poker_equity.GameState",
+    use_color: bool = True,
+    show_recommend: bool = False,
+    num_sims: int = 2000,
+    seed: int | None = None,
+    deck: Deck | None = None,
+    input_fn: Callable[[str], str] | None = None,
+) -> int:
+    """Run the interactive table REPL loop.
+
+    Prompts the user for actions at each decision point, advances streets
+    automatically when betting rounds complete, deals community cards,
+    and displays updated table state after each action.
+
+    Parameters
+    ----------
+    table : GameState
+        Mutable game state.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    show_recommend : bool, default=False
+        Whether to auto-display recommendations at each action point.
+    num_sims : int, default=2000
+        Monte Carlo simulations for equity/recommendation.
+    seed : int | None, default=None
+        RNG seed for simulation repeatability.
+    deck : Deck | None, default=None
+        Deck to draw community cards from.
+    input_fn : Callable[[str], str] | None, default=None
+        Custom input function for testing. Defaults to ``builtins.input``.
+
+    Returns
+    -------
+    int
+        Exit status code (0 for normal exit).
+    """
+    if input_fn is None:
+        input_fn = input
+
+    print(colorize(
+        "=== Interactive Table Simulator ===",
+        Colors.BOLD + Colors.CYAN, use_color,
+    ))
+    print(colorize(
+        "Type 'help' for commands, 'quit' to exit.\n",
+        Colors.DIM, use_color,
+    ))
+
+    _print_table_state(table, use_color=use_color)
+
+    while not table.is_hand_over:
+        if show_recommend:
+            _print_table_recommendation(
+                table, use_color=use_color, num_sims=num_sims, seed=seed,
+            )
+
+        prompt = _format_action_prompt(table, use_color=use_color)
+        try:
+            raw = input_fn(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting table simulator.")
+            return 0
+
+        raw = raw.strip()
+        if not raw:
+            continue
+
+        cmd_lower = raw.lower()
+        if cmd_lower in ("quit", "q", "exit"):
+            print("Exiting table simulator.")
+            return 0
+        elif cmd_lower in ("help", "h", "?"):
+            _print_interactive_help(use_color=use_color)
+            continue
+        elif cmd_lower in ("state", "s"):
+            _print_table_state(table, use_color=use_color)
+            continue
+        elif cmd_lower in ("history", "hist"):
+            _print_hand_history(table, use_color=use_color)
+            continue
+        elif cmd_lower in ("recommend", "rec"):
+            _print_table_recommendation(
+                table, use_color=use_color, num_sims=num_sims, seed=seed,
+            )
+            continue
+        elif cmd_lower.startswith("deal ") or cmd_lower.startswith("board "):
+            card_str = raw.split(None, 1)[1]
+            try:
+                new_c = parse_cards_flexible(card_str)
+                table.board.extend(new_c)
+                if deck:
+                    deck.remove(new_c)
+                print(colorize(f"  Added board cards: {cards_to_str(new_c)}", Colors.GREEN, use_color))
+            except Exception as exc:
+                print(colorize(f"  Error parsing cards: {exc}", Colors.RED, use_color))
+            continue
+
+        # Parse and apply action
+        action_str, amount = _parse_action_input(raw)
+        try:
+            action, amt = _resolve_action(action_str, amount, table)
+            record = table.apply_action(action, amount=amt)
+            _print_action_record(record, use_color=use_color)
+        except ValueError as exc:
+            print(colorize(f"  Error: {exc}", Colors.RED, use_color))
+            continue
+
+        # Check for street transition
+        _check_street_transition(table, use_color=use_color, deck=deck)
+
+    # Hand complete
+    print(colorize(
+        "\n=== Hand Complete ===", Colors.BOLD + Colors.CYAN, use_color,
+    ))
+    _print_table_state(table, use_color=use_color)
+    _resolve_showdown(table, use_color=use_color)
+    return 0
+
+
+def _print_action_record(
+    record: "poker_equity.game_state.ActionRecord",
+    use_color: bool = True,
+) -> None:
+    """Print a single action record after it's applied.
+
+    Parameters
+    ----------
+    record : ActionRecord
+        The action that was just applied.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    """
+    amt_str = f" {record.amount:.2f}" if record.amount > 0 else ""
+    ai_str = colorize(" [ALL-IN]", Colors.RED + Colors.BOLD, use_color) if record.is_all_in else ""
+    action_label = record.action.value.upper()
+    if record.action.is_aggressive:
+        action_label = colorize(action_label, Colors.RED, use_color)
+    elif record.action == poker_equity.decision.Action.FOLD:
+        action_label = colorize(action_label, Colors.DIM, use_color)
+    else:
+        action_label = colorize(action_label, Colors.GREEN, use_color)
+
+    print(f"  -> {record.player_id}: {action_label}{amt_str}{ai_str}  (Pot: {record.pot_after:.2f})")
+
+
+def _check_street_transition(
+    table: "poker_equity.GameState",
+    use_color: bool = True,
+    deck: Deck | None = None,
+    quiet: bool = False,
+) -> bool:
+    """Check if the current betting round is complete and advance streets.
+
+    Handles all-in board runouts, standard street advances (dealing new
+    community cards from the deck if undealt), and showdown triggering.
+
+    Parameters
+    ----------
+    table : GameState
+        Mutable game state.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    deck : Deck | None, default=None
+        Deck to draw community cards from.
+    quiet : bool, default=False
+        Whether to suppress print statements (e.g. for JSON output).
+
+    Returns
+    -------
+    bool
+        True if a transition or runout occurred, False otherwise.
+    """
+    if table.is_hand_over:
+        return False
+
+    active_not_allin = [p for p in table.active_players if not p.is_all_in]
+
+    # 1. All-in runout check: 0 non-all-in, or 1 non-all-in who matched current bet
+    is_all_in_runout = False
+    if len(active_not_allin) == 0:
+        is_all_in_runout = True
+    elif len(active_not_allin) == 1:
+        if active_not_allin[0].current_bet == table.current_bet:
+            street_actions = [r for r in table.history if r.street == table.street]
+            if street_actions:
+                is_all_in_runout = True
+
+    if is_all_in_runout:
+        while table.street.next_street is not None:
+            next_st = table.street.next_street
+            needed = 3 if next_st == poker_equity.equity_curve.Street.FLOP else 1
+            target_board_len = 3 if next_st == poker_equity.equity_curve.Street.FLOP else (4 if next_st == poker_equity.equity_curve.Street.TURN else 5)
+            if len(table.board) < target_board_len and deck and deck.remaining >= needed:
+                new_cards = deck.deal(needed)
+            else:
+                new_cards = []
+            if not quiet:
+                print(colorize(
+                    f"\n--- Dealing {next_st.name}{(': ' + cards_to_str(new_cards)) if new_cards else ''} ---",
+                    Colors.BOLD + Colors.MAGENTA, use_color,
+                ))
+            table.advance_street(new_cards=new_cards if new_cards else None)
+            if not quiet:
+                _print_table_state(table, use_color=use_color)
+
+        table.collect_bets()
+        return True
+
+    # 2. Standard street progression
+    all_matched = all(p.current_bet == table.current_bet for p in active_not_allin)
+    if not all_matched:
+        return False
+
+    street_actions = [r for r in table.history if r.street == table.street]
+    if not street_actions:
+        return False
+
+    acted_players = {r.player_id for r in street_actions}
+    all_acted = all(p.player_id in acted_players for p in active_not_allin)
+    if not all_acted:
+        return False
+
+    if table.street.next_street is not None:
+        next_st = table.street.next_street
+        needed = 3 if next_st == poker_equity.equity_curve.Street.FLOP else 1
+        target_board_len = 3 if next_st == poker_equity.equity_curve.Street.FLOP else (4 if next_st == poker_equity.equity_curve.Street.TURN else 5)
+        if len(table.board) < target_board_len and deck and deck.remaining >= needed:
+            new_cards = deck.deal(needed)
+        else:
+            new_cards = []
+        if not quiet:
+            print(colorize(
+                f"\n--- Advancing to {next_st.name}{(': ' + cards_to_str(new_cards)) if new_cards else ''} ---",
+                Colors.BOLD + Colors.MAGENTA, use_color,
+            ))
+        table.advance_street(new_cards=new_cards if new_cards else None)
+        if not quiet:
+            _print_table_state(table, use_color=use_color)
+        return True
+    else:
+        table.collect_bets()
+        return True
+
+
+def _resolve_showdown(
+    table: "poker_equity.GameState",
+    use_color: bool = True,
+) -> None:
+    """Resolve and print the showdown outcome or uncalled pot award.
+
+    Parameters
+    ----------
+    table : GameState
+        Completed game state.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    """
+    if len(table.active_players) == 1:
+        winner = table.active_players[0]
+        w_name = colorize(f"{winner.name} ({winner.player_id})", Colors.BOLD + Colors.GREEN, use_color)
+        print(colorize("\nHand Result:", Colors.BOLD, use_color))
+        print(f"  {w_name} wins {table.total_pot:.2f} chips (uncontested)!")
+        return
+
+    print(colorize("\nShowdown:", Colors.BOLD + Colors.CYAN, use_color))
+    evaluated_hands = {}
+    for p in table.active_players:
+        if p.has_cards and len(table.board) >= 5:
+            full_cards = list(p.cards) + list(table.board)
+            res = evaluate_hand(full_cards)
+            evaluated_hands[p.player_id] = res
+            cards_str = cards_to_str(p.cards)
+            print(f"  {p.name} [{cards_str}]: {res.description} ({res.rank.label})")
+        elif p.has_cards:
+            cards_str = cards_to_str(p.cards)
+            print(f"  {p.name} [{cards_str}]")
+        else:
+            print(f"  {p.name} [?? ??]")
+
+    if not evaluated_hands:
+        return
+
+    for idx, pot in enumerate(table.pots):
+        label = "Main Pot" if pot.is_main else f"Side Pot {idx}"
+        contenders = [
+            pid for pid in pot.eligible_player_ids
+            if pid in evaluated_hands
+        ]
+        if not contenders:
+            continue
+
+        best_score = max(evaluated_hands[pid] for pid in contenders)
+        winners = [pid for pid in contenders if evaluated_hands[pid] == best_score]
+
+        if len(winners) == 1:
+            win_p = table.get_player(winners[0])
+            w_label = colorize(f"{win_p.name}", Colors.BOLD + Colors.GREEN, use_color)
+            print(f"  -> {label} ({pot.amount:.2f} chips): won by {w_label} ({best_score.description})")
+        else:
+            win_names = [table.get_player(pid).name for pid in winners]
+            split_amt = pot.amount / len(winners)
+            names_str = colorize(", ".join(win_names), Colors.BOLD + Colors.YELLOW, use_color)
+            print(f"  -> {label} ({pot.amount:.2f} chips): chopped between {names_str} ({split_amt:.2f} each)")
+
+
+def _print_interactive_help(use_color: bool = True) -> None:
+    """Print help text for interactive table commands.
+
+    Parameters
+    ----------
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    """
+    title = colorize("Interactive Table Commands:", Colors.BOLD, use_color)
+    print(f"\n{title}")
+    commands = [
+        ("fold / f", "Fold your hand"),
+        ("check / x", "Check (when no bet to call)"),
+        ("call / c", "Call the current bet"),
+        ("bet <amt> / b <amt>", "Open with a bet"),
+        ("raise <amt> / r <amt>", "Raise to <amt> total"),
+        ("all-in / ai / jam", "Go all-in"),
+        ("deal <cards>", "Manually deal/add board cards"),
+        ("state / s", "Redisplay table state"),
+        ("history / hist", "Show hand history"),
+        ("recommend / rec", "Get decision recommendation"),
+        ("help / h / ?", "Show this help"),
+        ("quit / q / exit", "Exit simulator"),
+    ]
+    for cmd, desc in commands:
+        cmd_fmt = colorize(f"  {cmd:<26}", Colors.YELLOW, use_color)
+        print(f"{cmd_fmt} {desc}")
+    print()
+
+
+def _print_hand_history(
+    table: "poker_equity.GameState",
+    use_color: bool = True,
+) -> None:
+    """Print the full hand history for the current game.
+
+    Parameters
+    ----------
+    table : GameState
+        Current game state.
+    use_color : bool, default=True
+        Whether ANSI colors are enabled.
+    """
+    if not table.history:
+        print(colorize("  No actions recorded yet.", Colors.DIM, use_color))
+        return
+    print(colorize("Hand History:", Colors.BOLD, use_color))
+    for rec in table.history:
+        amt_str = f" {rec.amount:.2f}" if rec.amount > 0 else ""
+        ai_str = " [ALL-IN]" if rec.is_all_in else ""
+        print(
+            f"  [{rec.street.value}] {rec.player_id}: "
+            f"{rec.action.value.upper()}{amt_str}{ai_str} "
+            f"(pot: {rec.pot_before:.2f} -> {rec.pot_after:.2f})"
+        )
+    print()
 
 
 def handle_curve_command(args: argparse.Namespace, use_color: bool = True) -> int:
