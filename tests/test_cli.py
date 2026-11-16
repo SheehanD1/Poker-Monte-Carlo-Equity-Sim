@@ -36,7 +36,7 @@ class TestCliParser:
         ]
         assert len(subparsers_actions) == 1
         choices = subparsers_actions[0].choices
-        for expected in ("equity", "range", "odds", "outs", "decision", "table", "curve"):
+        for expected in ("equity", "range", "odds", "outs", "decision", "table", "curve", "twice", "rit", "run-it-twice"):
             assert expected in choices
 
     def test_main_no_args_prints_help(self, capsys):
@@ -1313,6 +1313,254 @@ class TestCliCurveCommand:
         data = json.loads(captured.out)
         assert "points" in data
         assert len(data["points"]) == 4
+
+    def test_curve_positional_arguments(self, capsys):
+        """Positional syntax: <hero> <villain> <board>."""
+        code = main([
+            "curve",
+            "Ah As", "Kh Ks", "2h 7h 8c 3c 4c",
+            "--sims", "200",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Equity Curve Analysis" in captured.out
+        assert "PREFLOP" in captured.out
+
+    def test_curve_chart_ascii_visualization(self, capsys):
+        """--chart flag renders visual street-by-street progress bars and spark graph."""
+        code = main([
+            "curve",
+            "Ah As", "Kh Ks", "2h 7h 8c 3c 4c",
+            "--chart",
+            "--sims", "200",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Street-by-Street Equity Trajectory:" in captured.out
+        assert "Equity Spark Graph (Hero):" in captured.out
+        assert "[PREFLOP]" in captured.out
+        assert "[RIVER  ]" in captured.out
+
+    def test_curve_next_street_distribution(self, capsys):
+        """--next flag analyzes all possible next-street cards on flop or turn."""
+        code = main([
+            "curve",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "--board", "2h 7h 8c",
+            "--next",
+            "--sims", "200",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Next Street Distribution (FLOP -> TURN)" in captured.out
+        assert "Unseen cards evaluated" in captured.out
+        assert "Mean Hero Equity" in captured.out
+
+    def test_curve_next_street_json(self, capsys):
+        """--next with --json includes next_street_distribution object."""
+        code = main([
+            "curve",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "--board", "2h 7h 8c",
+            "--next",
+            "--sims", "200",
+            "--seed", "42",
+            "--json",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "next_street_distribution" in data
+        assert data["next_street_distribution"]["current_street"] == "flop"
+        assert data["next_street_distribution"]["next_street"] == "turn"
+
+    def test_curve_missing_arguments_error(self, capsys):
+        """Missing required hands or board returns error code 2."""
+        code = main(["curve"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Hero cards, villain cards, and board cards" in captured.err
+
+    def test_curve_duplicate_cards_error(self, capsys):
+        """Duplicate cards between hands or board returns error code 2."""
+        code = main(["curve", "Ah As", "Ah Ks", "2h 7h 8c"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Duplicate cards detected" in captured.err
+
+    def test_curve_invalid_board_count_error(self, capsys):
+        """Invalid board length (e.g. 2 cards) returns error code 2."""
+        code = main(["curve", "Ah As", "Kh Ks", "2h 7h"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Board must have 3 (flop), 4 (turn), or 5 (river) cards" in captured.err
+
+    def test_curve_next_on_river_error(self, capsys):
+        """Requesting --next on river returns error code 2."""
+        code = main(["curve", "Ah As", "Kh Ks", "2h 7h 8c 3c 4c", "--next"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: --next is only supported on flop (3 cards) or turn (4 cards)" in captured.err
+
+
+class TestCliTwiceCommand:
+    """Tests for 'twice' (Run-It-Twice and Run-It-N-Times) subcommand."""
+
+    def test_twice_basic_simulation(self, capsys):
+        """Basic preflop Run-It-Twice simulation."""
+        code = main([
+            "twice",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "--sims", "500",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Run It 2 Times Analysis" in captured.out
+        assert "Overall Equities:" in captured.out
+        assert "Multi-Board Outcomes (2 Boards):" in captured.out
+        assert "Variance Reduction:" in captured.out
+
+    def test_twice_positional_arguments(self, capsys):
+        """Positional syntax: <hero> <villain> [<board>]."""
+        code = main([
+            "twice",
+            "Ah Kh", "Qc Qd", "2h 7h 8c",
+            "--sims", "500",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Board: [2h 7h 8c] (Flop)" in captured.out
+        assert "Variance reduction" in captured.out
+
+    def test_twice_with_pot_expected_payouts(self, capsys):
+        """--pot calculates expected chip/dollar payouts for each player."""
+        code = main([
+            "twice",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "-b", "2h 7h 8c",
+            "--pot", "200",
+            "--sims", "500",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Expected Payouts:" in captured.out
+        assert "Total Pot Size             : 200.00 chips" in captured.out
+        assert "Hero expected payout" in captured.out
+        assert "Villain expected payout" in captured.out
+
+    def test_twice_exact_enumeration_turn(self, capsys):
+        """--exact calculates exact combinatorial Run-It-Twice equities on turn."""
+        code = main([
+            "twice",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "-b", "2h 7h 8c 3c",
+            "--exact",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Exact Enumeration" in captured.out
+        assert "Hero (Player 1)" in captured.out
+        assert "Variance reduction" in captured.out
+
+    def test_twice_exact_invalid_board_error(self, capsys):
+        """--exact on non-turn board returns error code 2."""
+        code = main([
+            "twice",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "-b", "2h 7h 8c",
+            "--exact",
+        ])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: --exact is only supported on the turn (4 board cards)" in captured.err
+
+    def test_twice_run_it_three_times(self, capsys):
+        """--runs 3 simulates running it 3 times."""
+        code = main([
+            "twice",
+            "--hero", "Ah Kh",
+            "--villain", "Qc Qd",
+            "--runs", "3",
+            "--sims", "500",
+            "--seed", "42",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Run It 3 Times Analysis" in captured.out
+        assert "Multi-Board Outcomes (3 Boards):" in captured.out
+
+    def test_twice_aliases_rit_and_run_it_twice(self, capsys):
+        """Aliases 'rit' and 'run-it-twice' invoke the same command."""
+        code1 = main(["rit", "Ah Kh", "Qc Qd", "--sims", "200", "--seed", "42"])
+        assert code1 == 0
+        out1 = capsys.readouterr().out
+        assert "Run It 2 Times Analysis" in out1
+
+        code2 = main(["run-it-twice", "Ah Kh", "Qc Qd", "--sims", "200", "--seed", "42"])
+        assert code2 == 0
+        out2 = capsys.readouterr().out
+        assert "Run It 2 Times Analysis" in out2
+
+    def test_twice_json_output(self, capsys):
+        """--json produces structured dictionary with pot size and payouts."""
+        code = main([
+            "twice",
+            "Ah Kh", "Qc Qd",
+            "-b", "2h 7h 8c",
+            "--pot", "150",
+            "--sims", "500",
+            "--seed", "42",
+            "--json",
+        ])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "equities" in data
+        assert "scoop_pcts" in data
+        assert "split_pct" in data
+        assert "variance_reduction" in data
+        assert data["pot_size"] == 150.0
+        assert len(data["expected_payouts"]) == 2
+
+    def test_twice_missing_arguments_error(self, capsys):
+        """Missing hero or villain cards returns error code 2."""
+        code = main(["twice"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Both hero and villain hole cards are required" in captured.err
+
+    def test_twice_duplicate_cards_error(self, capsys):
+        """Duplicate cards between hero and villain returns error code 2."""
+        code = main(["twice", "Ah Kh", "Ah Qd"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Duplicate cards detected" in captured.err
+
+    def test_twice_river_board_error(self, capsys):
+        """Providing a river board (5 cards) returns error code 2."""
+        code = main(["twice", "Ah Kh", "Qc Qd", "2h 7h 8c 3c 4c"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Board must have 0 (preflop), 3 (flop), or 4 (turn) cards" in captured.err
+
+    def test_twice_invalid_runs_error(self, capsys):
+        """--runs less than 2 returns error code 2."""
+        code = main(["twice", "Ah Kh", "Qc Qd", "--runs", "1"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: --runs must be at least 2" in captured.err
 
 
 class TestCliExportAndEntry:

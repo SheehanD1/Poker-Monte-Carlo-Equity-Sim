@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
+from typing import Any, Sequence
 
 from poker_equity.card import Card
 from poker_equity.constants import FULL_DECK_LIST, cards_to_str, parse_cards
@@ -447,6 +447,29 @@ class NextStreetDistribution:
             f"Neutral Cards          : {self.neutral_count}",
         ]
         return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize next street distribution to a dictionary suitable for JSON.
+
+        Returns
+        -------
+        dict[str, Any]
+            Structured representation containing street details and card breakdown.
+        """
+        return {
+            "current_street": self.current_street.value,
+            "next_street": self.next_street.value,
+            "unseen_cards_count": self.unseen_cards_count,
+            "mean_hero_equity": self.mean_hero_equity,
+            "min_hero_equity": self.min_hero_equity,
+            "max_hero_equity": self.max_hero_equity,
+            "favorable_count": self.favorable_count,
+            "unfavorable_count": self.unfavorable_count,
+            "neutral_count": self.neutral_count,
+            "favorable_cards": [str(c) for c in self.hero_favorable_cards],
+            "unfavorable_cards": [str(c) for c in self.hero_unfavorable_cards],
+            "neutral_cards": [str(c) for c in self.hero_neutral_cards],
+        }
 
 
 # =========================================================================

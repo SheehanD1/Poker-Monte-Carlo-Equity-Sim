@@ -17,10 +17,23 @@ from typing import Any, Callable, Sequence
 
 import poker_equity
 import poker_equity.decision
+from poker_equity.all_in import (
+    RunItTimesResult,
+    exact_run_it_twice_turn,
+    simulate_run_it_n,
+    simulate_run_it_twice,
+)
 from poker_equity.breakdown import range_vs_hand_breakdown
 from poker_equity.card import Card, Rank, Suit
 from poker_equity.constants import cards_to_str, parse_cards
 from poker_equity.deck import Deck
+from poker_equity.equity_curve import (
+    EquityCurve,
+    NextStreetDistribution,
+    Street,
+    calculate_equity_curve,
+    calculate_next_street_distribution,
+)
 from poker_equity.evaluator import evaluate_hand
 from poker_equity.parallel import calculate_equities_parallel
 from poker_equity.presets import PRESET_RANGES, get_preset_range, top_percent_range
@@ -372,6 +385,7 @@ def make_equity_bar(
     equity: float,
     width: int = 10,
     enable: bool = True,
+    use_color: bool | None = None,
 ) -> str:
     """Construct an ASCII/Unicode progress bar showing equity fraction.
 
@@ -383,12 +397,17 @@ def make_equity_bar(
         Number of block characters inside the bar.
     enable : bool
         Whether to apply ANSI color codes.
+    use_color : bool | None, default=None
+        Alias for ``enable`` to support flexible keyword calling.
 
     Returns
     -------
     str
         Formatted equity bar e.g. ``'[██████░░░░]'``.
     """
+    if use_color is not None:
+        enable = use_color
+
     eq_clamped = max(0.0, min(1.0, equity))
     filled = int(round(eq_clamped * width))
     empty = max(0, width - filled)
@@ -1058,33 +1077,117 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # ---------------------------------------------------------------------
+    # Subcommand: twice (run-it-twice)
+    # ---------------------------------------------------------------------
+    p_tw = subparsers.add_parser(
+        "twice",
+        aliases=["rit", "run-it-twice"],
+        parents=[common_parser],
+        help="Simulate all-in Run-It-Twice (or N-times) board runs.",
+        description=(
+            "Run-It-Twice (or Run-It-N-Times) all-in simulation for heads-up pots. "
+            "Evaluates multi-board equities, scoop probabilities, split probabilities, "
+            "pot payouts, and variance reduction."
+        ),
+    )
+    p_tw.add_argument(
+        "cards",
+        nargs="*",
+        help="Positional cards: <hero> <villain> [<board>] (e.g. 'Ah Kh' 'Qc Qd' '2h 7h 8c').",
+    )
+    p_tw.add_argument(
+        "--hero",
+        "-H",
+        type=str,
+        default=None,
+        help="Hero hole cards (e.g. 'Ah Kh').",
+    )
+    p_tw.add_argument(
+        "--villain",
+        "-V",
+        type=str,
+        default=None,
+        help="Villain hole cards (e.g. 'Qc Qd').",
+    )
+    p_tw.add_argument(
+        "--board",
+        "-b",
+        type=str,
+        default=None,
+        help="Existing board cards: 0 (preflop), 3 (flop), or 4 (turn).",
+    )
+    p_tw.add_argument(
+        "--runs",
+        "-r",
+        type=int,
+        default=2,
+        help="Number of boards to run (default: 2 for Run-It-Twice).",
+    )
+    p_tw.add_argument(
+        "--pot",
+        "-p",
+        type=float,
+        default=None,
+        help="Total pot size for expected chip/dollar payouts.",
+    )
+    p_tw.add_argument(
+        "--exact",
+        "-e",
+        action="store_true",
+        default=False,
+        help="Use exact combinatorial enumeration (turn boards only).",
+    )
+    p_tw.add_argument(
+        "--sims",
+        "-n",
+        type=int,
+        default=10_000,
+        help="Number of Monte Carlo simulations (default: 10,000).",
+    )
+    p_tw.add_argument(
+        "--seed",
+        "-s",
+        type=int,
+        default=None,
+        help="RNG seed for deterministic evaluation.",
+    )
+
+    # ---------------------------------------------------------------------
     # Subcommand: curve
     # ---------------------------------------------------------------------
     p_crv = subparsers.add_parser(
         "curve",
         parents=[common_parser],
         help="Track street-by-street equity transitions across board cards.",
-        description="Analyzes equity curve from Preflop -> Flop -> Turn -> River.",
+        description=(
+            "Analyzes equity curve from Preflop -> Flop -> Turn -> River, "
+            "identifying lead changes, equity swings, turning points, and bad beats."
+        ),
+    )
+    p_crv.add_argument(
+        "cards",
+        nargs="*",
+        help="Positional cards: <hero> <villain> [<board>] (e.g. 'Ah As' 'Kh Ks' '2h 7h 8c 3c 4c').",
     )
     p_crv.add_argument(
         "--hero",
         "-H",
         type=str,
-        required=True,
+        default=None,
         help="Hero hole cards (e.g. 'Ah As').",
     )
     p_crv.add_argument(
         "--villain",
         "-V",
         type=str,
-        required=True,
+        default=None,
         help="Villain hole cards (e.g. 'Kh Ks').",
     )
     p_crv.add_argument(
         "--board",
         "-b",
         type=str,
-        required=True,
+        default=None,
         help="Board cards (3 to 5 cards, e.g. '2h 7h 8c 3c 4c').",
     )
     p_crv.add_argument(
@@ -1093,6 +1196,26 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=2000,
         help="Simulations per street (default: 2000).",
+    )
+    p_crv.add_argument(
+        "--seed",
+        "-s",
+        type=int,
+        default=None,
+        help="RNG seed for deterministic evaluation.",
+    )
+    p_crv.add_argument(
+        "--chart",
+        "--ascii",
+        action="store_true",
+        default=False,
+        help="Display an ASCII trajectory visualization of equity across streets.",
+    )
+    p_crv.add_argument(
+        "--next",
+        action="store_true",
+        default=False,
+        help="Analyze equity distribution across all possible next-street cards (flop or turn).",
     )
 
     return parser
@@ -3272,19 +3395,399 @@ def _print_hand_history(
     print()
 
 
+def format_ascii_equity_curve(curve: EquityCurve, use_color: bool = True) -> str:
+    """Format an ASCII equity trajectory chart across streets.
+
+    Parameters
+    ----------
+    curve : EquityCurve
+        Calculated equity curve containing street points.
+    use_color : bool, default=True
+        Whether ANSI color codes are enabled.
+
+    Returns
+    -------
+    str
+        Formatted multiline ASCII trajectory representation.
+    """
+    lines = []
+    lines.append(colorize("Street-by-Street Equity Trajectory:", Colors.BOLD, use_color))
+    lines.append("=" * 68)
+
+    turning_pt = curve.turning_point
+
+    for pt in curve.points:
+        st_name = pt.street.name
+        h_eq = pt.hero_equity
+        v_eq = pt.villain_equity
+        h_bar = make_equity_bar(h_eq, width=20, use_color=use_color)
+        v_bar = make_equity_bar(v_eq, width=20, use_color=use_color)
+
+        delta_tag = ""
+        if pt.street != Street.PREFLOP:
+            d_val = pt.hero_delta
+            d_col = Colors.GREEN if d_val > 0 else (Colors.RED if d_val < 0 else Colors.DIM)
+            delta_tag = f" (Hero Δ: {colorize(f'{d_val * 100:+.1f}%', d_col, use_color)})"
+
+        if turning_pt and pt.street == turning_pt.street:
+            delta_tag += " " + colorize("[TURNING POINT]", Colors.BOLD + Colors.YELLOW, use_color)
+
+        if pt.street == Street.RIVER and curve.is_bad_beat:
+            delta_tag += " " + colorize("[BAD BEAT!]", Colors.BOLD + Colors.RED, use_color)
+
+        b_cards = cards_to_str(pt.board) if pt.board else "None"
+
+        lines.append(
+            f"  {colorize(f'[{st_name:<7}]', Colors.BOLD + Colors.CYAN, use_color)} "
+            f"Board: [{b_cards:<14}]{delta_tag}"
+        )
+        lines.append(
+            f"    Hero   : {h_eq * 100:5.1f}% {h_bar}  [{pt.hand_description(0)}]"
+        )
+        lines.append(
+            f"    Villain: {v_eq * 100:5.1f}% {v_bar}  [{pt.hand_description(1)}]"
+        )
+        lines.append("")
+
+    # Trajectory Spark Chart
+    lines.append(colorize("Equity Spark Graph (Hero):", Colors.BOLD + Colors.CYAN, use_color))
+    spark_levels = ["  100% |", "   80% |", "   60% |", "   40% |", "   20% |", "    0% |"]
+    grid_rows = [[" " for _ in range(len(curve.points) * 10)] for _ in range(5)]
+
+    for col_idx, pt in enumerate(curve.points):
+        x = col_idx * 10 + 3
+        eq = pt.hero_equity
+        row = min(4, max(0, 4 - int(round(eq * 4))))
+        marker = colorize("●", Colors.GREEN if eq >= 0.5 else Colors.RED, use_color)
+        grid_rows[row][x] = marker
+        pct_label = f"{eq * 100:.0f}%"
+        for i, ch in enumerate(pct_label):
+            if x + 1 + i < len(grid_rows[row]):
+                grid_rows[row][x + 1 + i] = ch
+
+    for r_idx, row in enumerate(grid_rows):
+        lines.append(f"{spark_levels[r_idx]} {''.join(row)}")
+    lines.append("       +" + "-" * (len(curve.points) * 10 + 4))
+
+    st_labels = "       " + "".join(f"{pt.street.name:<10}" for pt in curve.points)
+    lines.append(colorize(st_labels, Colors.DIM, use_color))
+
+    return "\n".join(lines)
+
+
 def handle_curve_command(args: argparse.Namespace, use_color: bool = True) -> int:
-    """Execute the 'curve' subcommand."""
-    curve = poker_equity.calculate_equity_curve(
-        hands=[args.hero, args.villain],
-        board=args.board,
-        num_sims=args.sims,
-    )
+    """Execute the 'curve' subcommand for street-by-street equity analysis."""
+    hero_raw = args.hero
+    villain_raw = args.villain
+    board_raw = args.board
+    cards_pos = getattr(args, "cards", []) or []
+
+    # Positional resolution
+    if cards_pos:
+        if len(cards_pos) == 3:
+            hero_raw = hero_raw or cards_pos[0]
+            villain_raw = villain_raw or cards_pos[1]
+            board_raw = board_raw or cards_pos[2]
+        elif len(cards_pos) >= 5 and (hero_raw is None or villain_raw is None or board_raw is None):
+            try:
+                all_pos = parse_cards_flexible(" ".join(cards_pos))
+                if len(all_pos) in (7, 8, 9):
+                    if hero_raw is None:
+                        hero_raw = cards_to_str(all_pos[0:2])
+                    if villain_raw is None:
+                        villain_raw = cards_to_str(all_pos[2:4])
+                    if board_raw is None:
+                        board_raw = cards_to_str(all_pos[4:])
+            except Exception:
+                pass
+        elif hero_raw is not None and villain_raw is not None and board_raw is None:
+            board_raw = " ".join(cards_pos)
+
+    if not hero_raw or not villain_raw or not board_raw:
+        sys.stderr.write(
+            "Error: Hero cards, villain cards, and board cards (3, 4, or 5 cards) are required "
+            "(e.g. 'poker-equity curve AhAs KhKs \"2h 7h 8c 3c 4c\"' or '--hero AhAs --villain KhKs --board \"2h 7h 8c 3c 4c\"').\n"
+        )
+        return 2
+
+    try:
+        h_cards = parse_cards_flexible(hero_raw)
+        v_cards = parse_cards_flexible(villain_raw)
+        b_cards = parse_cards_flexible(board_raw)
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing cards: {exc}\n")
+        return 2
+
+    if len(h_cards) != 2:
+        sys.stderr.write(f"Error: Hero must have exactly 2 cards, got {len(h_cards)}.\n")
+        return 2
+    if len(v_cards) != 2:
+        sys.stderr.write(f"Error: Villain must have exactly 2 cards, got {len(v_cards)}.\n")
+        return 2
+    if len(b_cards) not in (3, 4, 5):
+        sys.stderr.write(
+            f"Error: Board must have 3 (flop), 4 (turn), or 5 (river) cards, got {len(b_cards)}.\n"
+        )
+        return 2
+
+    all_cards = h_cards + v_cards + b_cards
+    if len(set(all_cards)) != len(all_cards):
+        sys.stderr.write(f"Error: Duplicate cards detected: {cards_to_str(all_cards)}\n")
+        return 2
+
+    seed = getattr(args, "seed", None)
+    try:
+        curve = calculate_equity_curve(
+            hands=[h_cards, v_cards],
+            board=b_cards,
+            num_sims=args.sims,
+            seed=seed,
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+
+    next_dist = None
+    if getattr(args, "next", False):
+        if len(b_cards) not in (3, 4):
+            sys.stderr.write(
+                f"Error: --next is only supported on flop (3 cards) or turn (4 cards), got {len(b_cards)}.\n"
+            )
+            return 2
+        try:
+            next_dist = calculate_next_street_distribution(
+                hero=h_cards,
+                villain=v_cards,
+                board=b_cards,
+                seed=seed,
+            )
+        except Exception as exc:
+            sys.stderr.write(f"Error analyzing next street: {exc}\n")
+            return 1
 
     if args.json:
-        print(json.dumps(curve.to_dict(), indent=2))
+        data = curve.to_dict()
+        data["plot_data"] = curve.plot_data()
+        if next_dist is not None:
+            data["next_street_distribution"] = next_dist.to_dict()
+        print(json.dumps(data, indent=2))
         return 0
 
     print(curve.summary())
+
+    if getattr(args, "chart", False) or getattr(args, "ascii", False):
+        print()
+        print(format_ascii_equity_curve(curve, use_color=use_color))
+
+    if next_dist is not None:
+        print()
+        print(next_dist.summary())
+
+    return 0
+
+
+def format_run_it_twice_summary(
+    res: RunItTimesResult,
+    pot: float | None = None,
+    board: Sequence[Card] | None = None,
+    use_color: bool = True,
+) -> str:
+    """Format terminal report for Run-It-Twice (or Run-It-N-Times) simulation.
+
+    Parameters
+    ----------
+    res : RunItTimesResult
+        Simulation or exact enumeration result.
+    pot : float | None, default=None
+        Optional total pot size in chips or currency.
+    board : Sequence[Card] | None, default=None
+        Existing board cards if any.
+    use_color : bool, default=True
+        Whether ANSI color formatting is enabled.
+
+    Returns
+    -------
+    str
+        Formatted multiline terminal output.
+    """
+    method_str = "Exact Enumeration" if res.is_exact else f"{res.num_sims:,} Simulations"
+    header = f"=== Run It {res.num_runs} Times Analysis ({method_str}) ==="
+    lines = [
+        colorize(header, Colors.BOLD + Colors.CYAN, use_color),
+    ]
+    if board:
+        st_name = "Preflop" if len(board) == 0 else ("Flop" if len(board) == 3 else "Turn")
+        lines.append(f"Board: [{colorize(cards_to_str(board), Colors.BOLD, use_color)}] ({st_name})")
+    lines.append("=" * len(strip_ansi(header)))
+
+    lines.append(colorize("Overall Equities:", Colors.BOLD, use_color))
+    for p_idx, eq in enumerate(res.equities):
+        label = "Hero (Player 1)" if p_idx == 0 else ("Villain (Player 2)" if (p_idx == 1 and len(res.equities) == 2) else f"Player {p_idx + 1}")
+        col = Colors.GREEN if eq >= 0.5 else Colors.RED
+        bar = make_equity_bar(eq, width=22, use_color=use_color)
+        lines.append(f"  {label:<18}: {colorize(f'{eq * 100:6.2f}%', col, use_color)}  {bar}")
+
+    lines.append("")
+    lines.append(colorize(f"Multi-Board Outcomes ({res.num_runs} Boards):", Colors.BOLD, use_color))
+    for p_idx, scoop in enumerate(res.scoop_pcts):
+        label = f"Hero scoops all {res.num_runs}" if p_idx == 0 else (f"Villain scoops all {res.num_runs}" if (p_idx == 1 and len(res.scoop_pcts) == 2) else f"Player {p_idx + 1} scoops all {res.num_runs}")
+        lines.append(f"  {label:<28}: {scoop * 100:6.2f}%")
+    lines.append(f"  {'Split pot (split boards)':<28}: {res.split_pct * 100:6.2f}%")
+
+    if pot is not None and pot > 0:
+        lines.append("")
+        lines.append(colorize("Expected Payouts:", Colors.BOLD, use_color))
+        lines.append(f"  Total Pot Size             : {pot:.2f} chips")
+        payouts = res.expected_payouts(pot)
+        for p_idx, pay in enumerate(payouts):
+            label = "Hero expected payout" if p_idx == 0 else ("Villain expected payout" if (p_idx == 1 and len(payouts) == 2) else f"Player {p_idx + 1} expected payout")
+            lines.append(f"  {label:<28}: {pay:.2f} chips ({res.equities[p_idx] * 100:.1f}%)")
+
+    lines.append("")
+    lines.append(colorize("Variance Reduction:", Colors.BOLD, use_color))
+    lines.append(f"  Single-board variance      : {res.variance_single:.4f}")
+    lines.append(f"  Run It {res.num_runs} variance         : {res.variance_multi:.4f}")
+    vr_col = Colors.BOLD + Colors.GREEN if res.variance_reduction > 0 else Colors.YELLOW
+    lines.append(
+        f"  Variance reduction         : {colorize(f'{res.variance_reduction:.2f}%', vr_col, use_color)} "
+        f"{colorize('(Risk reduction)', Colors.DIM, use_color)}"
+    )
+
+    if len(res.board_equities) > 1:
+        lines.append("")
+        lines.append(colorize("Per-Board Breakdown:", Colors.BOLD, use_color))
+        for b_idx, b_eqs in enumerate(res.board_equities):
+            eq_strs = [f"P{p+1}: {e * 100:.1f}%" for p, e in enumerate(b_eqs)]
+            lines.append(f"  Board {b_idx + 1}: {', '.join(eq_strs)}")
+
+    return "\n".join(lines)
+
+
+def handle_twice_command(args: argparse.Namespace, use_color: bool = True) -> int:
+    """Execute the 'twice' subcommand for Run-It-Twice (and Run-It-N-Times) simulation.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    use_color : bool, default=True
+        Whether ANSI color formatting is enabled.
+
+    Returns
+    -------
+    int
+        Exit status code (0 for success, non-zero for error).
+    """
+    hero_raw = args.hero
+    villain_raw = args.villain
+    board_raw = args.board
+    cards_pos = getattr(args, "cards", []) or []
+
+    # Positional resolution
+    if cards_pos:
+        if len(cards_pos) == 2:
+            hero_raw = hero_raw or cards_pos[0]
+            villain_raw = villain_raw or cards_pos[1]
+        elif len(cards_pos) == 3:
+            hero_raw = hero_raw or cards_pos[0]
+            villain_raw = villain_raw or cards_pos[1]
+            board_raw = board_raw or cards_pos[2]
+        elif len(cards_pos) >= 4 and (hero_raw is None or villain_raw is None):
+            try:
+                all_pos = parse_cards_flexible(" ".join(cards_pos))
+                if len(all_pos) >= 4:
+                    if hero_raw is None:
+                        hero_raw = cards_to_str(all_pos[0:2])
+                    if villain_raw is None:
+                        villain_raw = cards_to_str(all_pos[2:4])
+                    if board_raw is None and len(all_pos) > 4:
+                        board_raw = cards_to_str(all_pos[4:])
+            except Exception:
+                pass
+        elif hero_raw is not None and villain_raw is not None and board_raw is None:
+            board_raw = " ".join(cards_pos)
+
+    if not hero_raw or not villain_raw:
+        sys.stderr.write(
+            "Error: Both hero and villain hole cards are required for Run It Twice "
+            "(e.g. 'poker-equity twice AhKh QcQd' or '--hero AhKh --villain QcQd').\n"
+        )
+        return 2
+
+    try:
+        h_cards = parse_cards_flexible(hero_raw)
+        v_cards = parse_cards_flexible(villain_raw)
+        b_cards = parse_cards_flexible(board_raw) if board_raw else []
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing cards: {exc}\n")
+        return 2
+
+    if len(h_cards) != 2:
+        sys.stderr.write(f"Error: Hero must have exactly 2 cards, got {len(h_cards)}.\n")
+        return 2
+    if len(v_cards) != 2:
+        sys.stderr.write(f"Error: Villain must have exactly 2 cards, got {len(v_cards)}.\n")
+        return 2
+    if len(b_cards) not in (0, 3, 4):
+        sys.stderr.write(
+            f"Error: Board must have 0 (preflop), 3 (flop), or 4 (turn) cards, got {len(b_cards)}.\n"
+        )
+        return 2
+
+    all_cards = h_cards + v_cards + b_cards
+    if len(set(all_cards)) != len(all_cards):
+        sys.stderr.write(f"Error: Duplicate cards detected: {cards_to_str(all_cards)}\n")
+        return 2
+
+    if args.exact:
+        if len(b_cards) != 4:
+            sys.stderr.write(
+                f"Error: --exact is only supported on the turn (4 board cards), got {len(b_cards)}.\n"
+            )
+            return 2
+        try:
+            res = exact_run_it_twice_turn(h_cards, v_cards, b_cards)
+        except Exception as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 1
+    else:
+        num_runs = getattr(args, "runs", 2) or 2
+        if num_runs < 2:
+            sys.stderr.write(f"Error: --runs must be at least 2, got {num_runs}.\n")
+            return 2
+        try:
+            if num_runs == 2:
+                res = simulate_run_it_twice(
+                    hero=h_cards,
+                    villain=v_cards,
+                    board=b_cards if b_cards else None,
+                    num_sims=args.sims,
+                    seed=args.seed,
+                )
+            else:
+                res = simulate_run_it_n(
+                    hands=[h_cards, v_cards],
+                    board=b_cards if b_cards else None,
+                    num_runs=num_runs,
+                    num_sims=args.sims,
+                    seed=args.seed,
+                )
+        except Exception as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 1
+
+    if args.json:
+        data = res.to_dict()
+        data["hero"] = cards_to_str(h_cards)
+        data["villain"] = cards_to_str(v_cards)
+        data["board"] = cards_to_str(b_cards)
+        if args.pot is not None:
+            data["pot_size"] = args.pot
+            data["expected_payouts"] = res.expected_payouts(args.pot)
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(format_run_it_twice_summary(res, pot=args.pot, board=b_cards, use_color=use_color))
     return 0
 
 
@@ -3330,6 +3833,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return handle_curve_command(args, use_color=use_color)
         elif args.command == "range":
             return handle_range_command(args, use_color=use_color)
+        elif args.command in ("twice", "rit", "run-it-twice"):
+            return handle_twice_command(args, use_color=use_color)
         else:
             parser.print_help()
             return 1

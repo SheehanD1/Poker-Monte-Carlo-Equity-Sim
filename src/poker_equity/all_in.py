@@ -15,7 +15,7 @@ import itertools
 import math
 import random
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 from poker_equity.card import Card
 from poker_equity.constants import FULL_DECK_LIST, cards_to_str, parse_cards
@@ -137,6 +137,31 @@ class RunItTimesResult:
                 lines.append(f"  Board {b_idx + 1}: {', '.join(eq_strs)}")
 
         return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize Run-It-N-Times results to a dictionary suitable for JSON.
+
+        Returns
+        -------
+        dict[str, Any]
+            Structured representation of the simulation results.
+        """
+        return {
+            "equities": list(self.equities),
+            "scoop_pcts": list(self.scoop_pcts),
+            "split_pct": self.split_pct,
+            "board_equities": [list(b) for b in self.board_equities],
+            "variance_single": self.variance_single,
+            "variance_multi": self.variance_multi,
+            "variance_reduction": self.variance_reduction,
+            "num_runs": self.num_runs,
+            "num_sims": self.num_sims,
+            "is_exact": self.is_exact,
+            "hero_equity": self.hero_equity,
+            "villain_equity": self.villain_equity,
+            "hero_scoop_pct": self.hero_scoop_pct,
+            "villain_scoop_pct": self.villain_scoop_pct,
+        }
 
 
 # =========================================================================
