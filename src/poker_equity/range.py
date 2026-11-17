@@ -13,7 +13,7 @@ import collections
 import itertools
 import random
 import re
-from typing import Final, Iterable, Iterator, Mapping, Sequence, TypeAlias
+from typing import Any, Final, Iterable, Iterator, Mapping, Sequence, TypeAlias
 
 from poker_equity.card import Card, Rank, Suit
 from poker_equity.constants import (
@@ -1854,4 +1854,131 @@ class Range:
                 idx += 1
             grid.append(row)
         return grid
+
+    def to_matrix_combos(self, include_zeros: bool = True) -> dict[str, float]:
+        """Convert this Range into a dictionary of active combo counts per cell.
+
+        Each key is a standard poker hand label (e.g. ``"AA"``, ``"AKs"``, ``"AKo"``),
+        and each value is the sum of weights of included combos for that cell.
+
+        Parameters
+        ----------
+        include_zeros : bool, default=True
+            If True, all 169 matrix cells are included (absent hands have 0.0 combos).
+            If False, only cells with combo sum > 0.0 are returned.
+
+        Returns
+        -------
+        dict[str, float]
+            Dictionary mapping hand labels to active combo counts.
+
+        Examples
+        --------
+        >>> from poker_equity.range import Range
+        >>> r = Range.from_str("AA, AKs")
+        >>> m = r.to_matrix_combos(include_zeros=False)
+        >>> m["AA"]
+        6.0
+        >>> m["AKs"]
+        4.0
+        """
+        weight_sums: dict[str, float] = collections.defaultdict(float)
+        for combo, w in self._weights.items():
+            weight_sums[combo_to_cell(combo)] += w
+
+        combos_dict: dict[str, float] = {}
+        for cell in HAND_GRID_CELLS:
+            w_sum = weight_sums.get(cell, 0.0)
+            if w_sum > 0.0:
+                combos_dict[cell] = w_sum
+            elif include_zeros:
+                combos_dict[cell] = 0.0
+
+        return combos_dict
+
+    def to_grid_combos_2d(self) -> list[list[float]]:
+        """Return a 13x13 nested list of combo counts for matrix visualization.
+
+        Rows and columns correspond to ranks Ace through 2 in descending order.
+        The main diagonal contains pocket pairs, the upper-right triangle
+        contains suited hands, and the lower-left triangle contains offsuit hands.
+
+        Returns
+        -------
+        list[list[float]]
+            A 13x13 list of combo counts.
+        """
+        combos_dict = self.to_matrix_combos(include_zeros=True)
+        grid: list[list[float]] = []
+        idx = 0
+        for _ in range(13):
+            row: list[float] = []
+            for _ in range(13):
+                cell = HAND_GRID_CELLS[idx]
+                row.append(combos_dict[cell])
+                idx += 1
+            grid.append(row)
+        return grid
+
+    def breakdown(self) -> dict[str, Any]:
+        """Compute combo counts and percentages by category (pairs, suited, offsuit).
+
+        Returns
+        -------
+        dict[str, Any]
+            Breakdown statistics including pairs, suited, and offsuit combos and percentages.
+
+        Examples
+        --------
+        >>> from poker_equity.range import Range
+        >>> r = Range.from_str("AA, AKs")
+        >>> b = r.breakdown()
+        >>> b["total_combos"]
+        10.0
+        >>> b["pairs"]["combos"]
+        6.0
+        >>> b["suited"]["combos"]
+        4.0
+        """
+        pairs_w = sum(w for (c1, c2), w in self._weights.items() if c1.rank == c2.rank)
+        suited_w = sum(
+            w for (c1, c2), w in self._weights.items() if c1.rank != c2.rank and c1.suit == c2.suit
+        )
+        offsuit_w = sum(
+            w for (c1, c2), w in self._weights.items() if c1.rank != c2.rank and c1.suit != c2.suit
+        )
+        total_w = pairs_w + suited_w + offsuit_w
+
+        m = self.to_matrix(include_zeros=False)
+        pairs_cells = sum(1 for c in m if len(c) == 2)
+        suited_cells = sum(1 for c in m if c.endswith("s"))
+        offsuit_cells = sum(1 for c in m if c.endswith("o"))
+
+        return {
+            "total_combos": round(total_w, 2),
+            "percentage_of_all": round((total_w / 1326.0) * 100.0, 2),
+            "total_cells": len(m),
+            "pairs": {
+                "combos": round(pairs_w, 2),
+                "total_possible": 78,
+                "percentage": round((pairs_w / 78.0) * 100.0, 2),
+                "cells": pairs_cells,
+                "total_cells": 13,
+            },
+            "suited": {
+                "combos": round(suited_w, 2),
+                "total_possible": 312,
+                "percentage": round((suited_w / 312.0) * 100.0, 2),
+                "cells": suited_cells,
+                "total_cells": 78,
+            },
+            "offsuit": {
+                "combos": round(offsuit_w, 2),
+                "total_possible": 936,
+                "percentage": round((offsuit_w / 936.0) * 100.0, 2),
+                "cells": offsuit_cells,
+                "total_cells": 78,
+            },
+        }
+
 

@@ -1563,6 +1563,229 @@ class TestCliTwiceCommand:
         assert "Error: --runs must be at least 2" in captured.err
 
 
+# =========================================================================
+# TestCliRangeMatrix
+# =========================================================================
+
+
+class TestCliRangeMatrix:
+    """Tests for the 13x13 range grid matrix CLI visualization."""
+
+    def test_matrix_single_range(self, capsys):
+        """Single range string renders 13x13 matrix and summary."""
+        code = main(["matrix", "QQ+, AKs"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Matrix: QQ+, AKs" in captured.out
+        assert "AA" in captured.out
+        assert "KK" in captured.out
+        assert "QQ" in captured.out
+        assert "AKs" in captured.out
+        assert "Range Summary:" in captured.out
+        assert "22.0 / 1326 combos" in captured.out
+
+    def test_matrix_named_preset(self, capsys):
+        """Named preset range renders matrix successfully."""
+        code = main(["matrix", "btn_open"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Matrix: btn_open" in captured.out
+        assert "Range Summary:" in captured.out
+
+    def test_matrix_percentage_preset(self, capsys):
+        """Top X% preset range renders matrix with expected combo count."""
+        code = main(["matrix", "top15%"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Matrix: top15%" in captured.out
+        assert "15.01%" in captured.out
+
+    def test_matrix_weighted_range(self, capsys):
+        """Weighted range displays asterisk for partial weights in hands mode."""
+        code = main(["matrix", "AA:1.0, KK:0.5"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "AA" in captured.out
+        assert "KK*" in captured.out
+
+    def test_matrix_grid_alias(self, capsys):
+        """'grid' subcommand alias works identically to 'matrix'."""
+        code = main(["grid", "TT+"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Matrix: TT+" in captured.out
+
+    def test_matrix_matrix13_alias(self, capsys):
+        """'matrix13' subcommand alias works identically to 'matrix'."""
+        code = main(["matrix13", "JJ+"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Matrix: JJ+" in captured.out
+
+    def test_matrix_mode_weights(self, capsys):
+        """--mode weights displays percentage weights."""
+        code = main(["matrix", "top10%", "--mode", "weights"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "100" in captured.out
+        assert "Legend: Numbers represent inclusion percentage" in captured.out
+
+    def test_matrix_mode_combos(self, capsys):
+        """--mode combos displays combo counts."""
+        code = main(["matrix", "AA, AKs", "--mode", "combos"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert " 6 " in captured.out
+        assert " 4 " in captured.out
+        assert "Legend: Numbers represent active combination count" in captured.out
+
+    def test_matrix_mode_heat(self, capsys):
+        """--mode heat displays character block shading."""
+        code = main(["matrix", "top15%", "--mode", "heat"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "██" in captured.out
+        assert "Legend: [██] 100%" in captured.out
+
+    def test_matrix_show_all(self, capsys):
+        """--show-all displays dimmed hand labels for empty cells."""
+        code = main(["matrix", "AA", "--show-all"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "72o" in captured.out
+
+    def test_matrix_no_summary(self, capsys):
+        """--no-summary suppresses the breakdown summary block."""
+        code = main(["matrix", "AA", "--no-summary"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Summary:" not in captured.out
+
+    def test_matrix_with_board_blockers(self, capsys):
+        """--board removes dead cards from combos in matrix display."""
+        code = main(["matrix", "AA, KK", "--board", "Ah Kd 2s", "--mode", "combos"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Blockers: [A♥ K♦ 2♠]" in captured.out
+        assert "6.0 combos removed by blockers" in captured.out
+
+    def test_matrix_with_dead_cards(self, capsys):
+        """--dead removes dead cards from combos."""
+        code = main(["matrix", "AA", "--dead", "As", "--mode", "combos"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "3.0 / 1326 combos" in captured.out
+
+    def test_matrix_comparison_two_ranges(self, capsys):
+        """Two positional ranges renders comparison matrix."""
+        code = main(["matrix", "QQ+, AKs", "TT+, AJs+, KQs, AKo"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Comparison: Hero (QQ+, AKs) vs Villain (TT+, AJs+, KQs, AKo)" in captured.out
+        assert "=AA" in captured.out
+        assert "-JJ" in captured.out
+        assert "Hero Only:" in captured.out
+        assert "Villain Only:" in captured.out
+        assert "Both/Overlap:" in captured.out
+
+    def test_matrix_comparison_named_args(self, capsys):
+        """--hero and --villain named arguments render comparison matrix."""
+        code = main(["matrix", "--hero", "QQ+", "--villain", "TT+"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Comparison: Hero (QQ+) vs Villain (TT+)" in captured.out
+        assert "=AA" in captured.out
+        assert "-TT" in captured.out
+
+    def test_matrix_json_single(self, capsys):
+        """--json output for single range contains valid matrix data."""
+        code = main(["matrix", "top10%", "--json"])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["spec"] == "top10%"
+        assert "grid" in data
+        assert len(data["grid"]) == 13
+        assert len(data["grid"][0]) == 13
+        assert "cells" in data
+        assert len(data["cells"]) == 169
+        assert "AA" in data["cells"]
+        assert data["cells"]["AA"]["type"] == "pair"
+        assert "breakdown" in data
+        assert data["breakdown"]["total_combos"] > 0
+
+    def test_matrix_json_comparison(self, capsys):
+        """--json output for two ranges contains hero, villain, and comparison."""
+        code = main(["matrix", "QQ+, AKs", "TT+, AJs+, KQs, AKo", "--json"])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "hero" in data
+        assert "villain" in data
+        assert "comparison" in data
+        cmp_data = data["comparison"]
+        assert cmp_data["overlap_combos"] == 22.0
+        assert "AA" in cmp_data["overlap_cells"]
+        assert "TT" in cmp_data["villain_only_cells"]
+
+    def test_range_command_with_matrix_flag_single(self, capsys):
+        """'range' subcommand with --matrix renders matrix for single range."""
+        code = main(["range", "top15%", "--matrix"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Matrix: top15%" in captured.out
+        assert "Range Summary:" in captured.out
+
+    def test_range_command_with_matrix_flag_two_ranges(self, capsys):
+        """'range' subcommand with --matrix and two ranges shows comparison and equity."""
+        code = main(["range", "QQ+", "TT+", "--matrix", "--sims", "500", "--seed", "42"])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "Range Comparison Matrix:" in captured.out
+        assert "Range vs Range Equity Simulation" in captured.out
+        assert "Hero" in captured.out
+        assert "Villain" in captured.out
+
+    def test_range_command_with_matrix_flag_json(self, capsys):
+        """'range' with --matrix and --json includes hero_matrix and villain_matrix."""
+        code = main(["range", "QQ+", "TT+", "--matrix", "--sims", "500", "--seed", "42", "--json"])
+        assert code == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "hero_matrix" in data
+        assert "villain_matrix" in data
+        assert "hero" in data
+        assert "villain" in data
+
+    def test_matrix_missing_range_error(self, capsys):
+        """matrix command with no arguments returns exit code 2."""
+        code = main(["matrix"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error: Must specify at least one range to visualize" in captured.err
+
+    def test_matrix_invalid_range_syntax(self, capsys):
+        """Invalid range string returns exit code 2."""
+        code = main(["matrix", "invalid_range_syntax_xyz"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error parsing range" in captured.err
+
+    def test_matrix_invalid_board_syntax(self, capsys):
+        """Invalid board string returns exit code 2."""
+        code = main(["matrix", "AA", "--board", "invalid_board_xyz"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error parsing board cards" in captured.err
+
+    def test_matrix_invalid_dead_syntax(self, capsys):
+        """Invalid dead cards string returns exit code 2."""
+        code = main(["matrix", "AA", "--dead", "invalid_dead_xyz"])
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "Error parsing dead cards" in captured.err
+
+
 class TestCliExportAndEntry:
     """Tests for cli_main export from top-level package."""
 

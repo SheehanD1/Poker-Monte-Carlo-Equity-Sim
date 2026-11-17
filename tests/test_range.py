@@ -1094,6 +1094,82 @@ class TestRangeToGrid2D:
 
 
 # =========================================================================
+# TestRangeToMatrixCombos
+# =========================================================================
+
+
+class TestRangeToMatrixCombos:
+    """Tests for Range.to_matrix_combos and Range.to_grid_combos_2d methods."""
+
+    def test_all_range_combos(self) -> None:
+        r = Range.all()
+        m = r.to_matrix_combos(include_zeros=True)
+        assert len(m) == 169
+        assert m["AA"] == 6.0
+        assert m["AKs"] == 4.0
+        assert m["AKo"] == 12.0
+        assert sum(m.values()) == 1326.0
+
+    def test_single_pair_combos(self) -> None:
+        r = Range.from_str("AA")
+        m = r.to_matrix_combos(include_zeros=False)
+        assert m == {"AA": 6.0}
+
+    def test_composite_range_combos(self) -> None:
+        r = Range.from_str("QQ+, AKs")
+        m = r.to_matrix_combos(include_zeros=False)
+        assert m["AA"] == 6.0
+        assert m["KK"] == 6.0
+        assert m["QQ"] == 6.0
+        assert m["AKs"] == 4.0
+        assert sum(m.values()) == 22.0
+
+    def test_grid_combos_2d_dimensions(self) -> None:
+        r = Range.from_str("AA, AKs, AKo")
+        grid = r.to_grid_combos_2d()
+        assert len(grid) == 13
+        assert all(len(row) == 13 for row in grid)
+        assert grid[0][0] == 6.0   # AA
+        assert grid[0][1] == 4.0   # AKs
+        assert grid[1][0] == 12.0  # AKo
+        assert grid[0][2] == 0.0   # AQs
+
+
+# =========================================================================
+# TestRangeBreakdown
+# =========================================================================
+
+
+class TestRangeBreakdown:
+    """Tests for Range.breakdown method."""
+
+    def test_breakdown_full_deck(self) -> None:
+        r = Range.all()
+        b = r.breakdown()
+        assert b["total_combos"] == 1326.0
+        assert b["percentage_of_all"] == 100.0
+        assert b["total_cells"] == 169
+        assert b["pairs"]["combos"] == 78.0
+        assert b["pairs"]["cells"] == 13
+        assert b["suited"]["combos"] == 312.0
+        assert b["suited"]["cells"] == 78
+        assert b["offsuit"]["combos"] == 936.0
+        assert b["offsuit"]["cells"] == 78
+
+    def test_breakdown_specific_range(self) -> None:
+        r = Range.from_str("QQ+, AKs, AKo")
+        b = r.breakdown()
+        assert b["total_combos"] == 34.0
+        assert b["pairs"]["combos"] == 18.0
+        assert b["pairs"]["cells"] == 3
+        assert b["suited"]["combos"] == 4.0
+        assert b["suited"]["cells"] == 1
+        assert b["offsuit"]["combos"] == 12.0
+        assert b["offsuit"]["cells"] == 1
+
+
+
+# =========================================================================
 # TestRangeFromMatrix
 # =========================================================================
 

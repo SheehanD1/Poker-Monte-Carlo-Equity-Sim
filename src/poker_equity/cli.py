@@ -37,7 +37,14 @@ from poker_equity.equity_curve import (
 from poker_equity.evaluator import evaluate_hand
 from poker_equity.parallel import calculate_equities_parallel
 from poker_equity.presets import PRESET_RANGES, get_preset_range, top_percent_range
-from poker_equity.range import Range, combo_to_cell, combo_to_str
+from poker_equity.range import (
+    CELL_COMBOS,
+    GRID_RANKS,
+    HAND_GRID_CELLS,
+    Range,
+    combo_to_cell,
+    combo_to_str,
+)
 from poker_equity.simulation import (
     ProgressCallback,
     ProgressInfo,
@@ -65,6 +72,16 @@ class Colors:
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
     WHITE = "\033[37m"
+
+    # Bright foreground colors
+    BRIGHT_BLACK = "\033[90m"
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_WHITE = "\033[97m"
 
     # Poker suit colors
     HEART = "\033[91m"     # Bright red
@@ -761,6 +778,25 @@ def create_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Show equity breakdown for top N combos in the range (for hand vs range).",
     )
+    p_rng.add_argument(
+        "--matrix",
+        "--grid",
+        action="store_true",
+        help="Display 13x13 starting hand grid matrix in terminal.",
+    )
+    p_rng.add_argument(
+        "--mode",
+        "-m",
+        choices=["hands", "weights", "combos", "heat", "shading"],
+        default="hands",
+        help="Grid cell display mode: 'hands' (default), 'weights', 'combos', or 'heat'.",
+    )
+    p_rng.add_argument(
+        "--show-all",
+        "-a",
+        action="store_true",
+        help="Show dim hand labels for excluded/empty cells instead of dots.",
+    )
 
     # ---------------------------------------------------------------------
     # Subcommand: odds
@@ -1218,6 +1254,69 @@ def create_parser() -> argparse.ArgumentParser:
         help="Analyze equity distribution across all possible next-street cards (flop or turn).",
     )
 
+    # ---------------------------------------------------------------------
+    # Subcommand: matrix / grid
+    # ---------------------------------------------------------------------
+    p_mat = subparsers.add_parser(
+        "matrix",
+        aliases=["grid", "matrix13"],
+        parents=[common_parser],
+        help="Visualize a 13x13 Texas Hold'em starting hand grid matrix.",
+        description="Display an ANSI-colored 13x13 range matrix in the terminal.",
+    )
+    p_mat.add_argument(
+        "ranges",
+        nargs="*",
+        help="One range to visualize, or two ranges (hero villain) to compare.",
+    )
+    p_mat.add_argument(
+        "--hero",
+        "-H",
+        type=str,
+        default=None,
+        help="Hero hand or range string (e.g. 'TT+, AJs+', 'top15%').",
+    )
+    p_mat.add_argument(
+        "--villain",
+        "-V",
+        type=str,
+        default=None,
+        help="Villain range string for comparison (e.g. '25%').",
+    )
+    p_mat.add_argument(
+        "--board",
+        "-b",
+        type=str,
+        default=None,
+        help="Community cards / blockers to exclude (e.g. 'Ah Kd 2s').",
+    )
+    p_mat.add_argument(
+        "--dead",
+        "-d",
+        type=str,
+        default=None,
+        help="Dead / folded cards to exclude (e.g. 'Kh 7c').",
+    )
+    p_mat.add_argument(
+        "--mode",
+        "-m",
+        choices=["hands", "weights", "combos", "heat", "shading"],
+        default="hands",
+        help="Grid cell display mode: 'hands' (default), 'weights', 'combos', or 'heat'.",
+    )
+    p_mat.add_argument(
+        "--show-all",
+        "-a",
+        action="store_true",
+        help="Show dim hand labels for excluded/empty cells instead of dots.",
+    )
+    p_mat.add_argument(
+        "--summary",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Display combination breakdown and summary below matrix (default: --summary).",
+    )
+
     return parser
 
 
@@ -1508,10 +1607,720 @@ def handle_equity_command(args: argparse.Namespace, use_color: bool = True) -> i
     return 0
 
 
+# =========================================================================
+# 13x13 Range Grid Matrix Visualizer
+# =========================================================================
+
+
+def format_range_matrix(
+    range_obj: Range,
+    use_color: bool = True,
+    mode: str = "hands",
+    show_all: bool = False,
+    title: str | None = None,
+    board_cards: Sequence[Card] | None = None,
+    dead_cards: Sequence[Card] | None = None,
+    show_summary: bool = True,
+) -> str:
+    """Format a Texas Hold'em range as a 13x13 starting hand grid for terminal display.
+
+    Ranks Ace through 2 form the 13 rows and columns. Pocket pairs lie on the diagonal
+    (AA to 22), suited combinations occupy the upper-right triangle (AKs to 32s), and
+    offsuit combinations occupy the lower-left triangle (AKo to 32o).
+
+    Parameters
+    ----------
+    range_obj : Range
+        The poker range to visualize.
+    use_color : bool, default=True
+        Whether to use ANSI color codes.
+    mode : {"hands", "weights", "combos", "heat", "shading"}, default="hands"
+        Grid cell display mode:
+        - "hands": displays hand labels (e.g. AA, AKs, AKo) or dots.
+        - "weights" / "pct": displays inclusion percentage (e.g. 100, 50, 25).
+        - "combos": displays active combination count (e.g. 6, 4, 12).
+        - "heat" / "shading": displays shaded blocks based on frequency.
+    show_all : bool, default=False
+        If True, display dim hand labels for unselected hands instead of dots.
+    title : str | None, default=None
+        Optional header title above the grid.
+    board_cards : Sequence[Card] | None, default=None
+        Board cards to treat as dead / blockers.
+    dead_cards : Sequence[Card] | None, default=None
+        Folded / dead cards to treat as blockers.
+    show_summary : bool, default=True
+        Whether to append combination breakdown and summary statistics below the grid.
+
+    Returns
+    -------
+    str
+        Formatted multiline terminal string.
+
+    Examples
+    --------
+    >>> from poker_equity.range import Range
+    >>> r = Range.from_str("AA, KK, AKs")
+    >>> grid_str = format_range_matrix(r, use_color=False)
+    >>> "AA" in grid_str
+    True
+    """
+    all_dead = list(board_cards or []) + list(dead_cards or [])
+    if all_dead:
+        live_range = range_obj.remove_dead_cards(all_dead)
+    else:
+        live_range = range_obj
+
+    matrix = live_range.to_matrix(include_zeros=True)
+    combos_dict = live_range.to_matrix_combos(include_zeros=True)
+
+    lines: list[str] = []
+    if title:
+        title_colored = (
+            f"{Colors.BOLD}{Colors.CYAN}{title}{Colors.RESET}"
+            if use_color
+            else title
+        )
+        lines.append(title_colored)
+
+    header = "     " + " ".join(rk.center(4) for rk in GRID_RANKS)
+    top_line = "   ┌" + ("─" * 66) + "┐"
+    bot_line = "   └" + ("─" * 66) + "┘"
+
+    lines.append(header)
+    lines.append(top_line)
+
+    idx = 0
+    norm_mode = mode.lower().strip()
+    for row_rk in GRID_RANKS:
+        row_cells: list[str] = []
+        for col_rk in GRID_RANKS:
+            cell = HAND_GRID_CELLS[idx]
+            w = matrix.get(cell, 0.0)
+            cnt = combos_dict.get(cell, 0.0)
+
+            if norm_mode in ("weights", "pct", "percent"):
+                if w > 0.0:
+                    val_str = f"{int(round(w * 100))}"
+                    cell_raw = val_str.center(4)
+                    if use_color:
+                        if w >= 0.99:
+                            row_cells.append(
+                                f"{Colors.BOLD}{Colors.BRIGHT_GREEN}{cell_raw}{Colors.RESET}"
+                            )
+                        elif w >= 0.50:
+                            row_cells.append(
+                                f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}{cell_raw}{Colors.RESET}"
+                            )
+                        else:
+                            row_cells.append(
+                                f"{Colors.BRIGHT_RED}{cell_raw}{Colors.RESET}"
+                            )
+                    else:
+                        row_cells.append(cell_raw)
+                else:
+                    empty_txt = " .  "
+                    row_cells.append(
+                        f"{Colors.DIM}{empty_txt}{Colors.RESET}"
+                        if use_color
+                        else empty_txt
+                    )
+
+            elif norm_mode == "combos":
+                if cnt > 0.0:
+                    if abs(cnt - round(cnt)) < 1e-4:
+                        cnt_str = str(int(round(cnt)))
+                    else:
+                        cnt_str = f"{cnt:.1f}"
+                    cell_raw = cnt_str.center(4)
+                    if use_color:
+                        if len(cell) == 2:
+                            row_cells.append(
+                                f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}{cell_raw}{Colors.RESET}"
+                            )
+                        elif cell.endswith("s"):
+                            row_cells.append(
+                                f"{Colors.BOLD}{Colors.BRIGHT_CYAN}{cell_raw}{Colors.RESET}"
+                            )
+                        else:
+                            row_cells.append(
+                                f"{Colors.BOLD}{Colors.BRIGHT_GREEN}{cell_raw}{Colors.RESET}"
+                            )
+                    else:
+                        row_cells.append(cell_raw)
+                else:
+                    empty_txt = " .  "
+                    row_cells.append(
+                        f"{Colors.DIM}{empty_txt}{Colors.RESET}"
+                        if use_color
+                        else empty_txt
+                    )
+
+            elif norm_mode in ("heat", "shading", "shade"):
+                if w >= 0.99:
+                    block = " ██ "
+                    row_cells.append(
+                        f"{Colors.BOLD}{Colors.BRIGHT_GREEN}{block}{Colors.RESET}"
+                        if use_color
+                        else block
+                    )
+                elif w >= 0.70:
+                    block = " ▓▓ "
+                    row_cells.append(
+                        f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}{block}{Colors.RESET}"
+                        if use_color
+                        else block
+                    )
+                elif w >= 0.40:
+                    block = " ▒▒ "
+                    row_cells.append(
+                        f"{Colors.BRIGHT_CYAN}{block}{Colors.RESET}"
+                        if use_color
+                        else block
+                    )
+                elif w > 0.0:
+                    block = " ░░ "
+                    row_cells.append(
+                        f"{Colors.DIM}{Colors.WHITE}{block}{Colors.RESET}"
+                        if use_color
+                        else block
+                    )
+                else:
+                    empty_txt = " .  "
+                    row_cells.append(
+                        f"{Colors.DIM}{empty_txt}{Colors.RESET}"
+                        if use_color
+                        else empty_txt
+                    )
+
+            else:  # default: "hands"
+                if w > 0.0:
+                    cell_raw = cell.center(4)
+                    if use_color:
+                        if w >= 0.99:
+                            if len(cell) == 2:
+                                row_cells.append(
+                                    f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}{cell_raw}{Colors.RESET}"
+                                )
+                            elif cell.endswith("s"):
+                                row_cells.append(
+                                    f"{Colors.BOLD}{Colors.BRIGHT_CYAN}{cell_raw}{Colors.RESET}"
+                                )
+                            else:
+                                row_cells.append(
+                                    f"{Colors.BOLD}{Colors.BRIGHT_GREEN}{cell_raw}{Colors.RESET}"
+                                )
+                        else:
+                            # Partial weight
+                            row_cells.append(
+                                f"{Colors.BOLD}{Colors.BRIGHT_MAGENTA}{cell_raw}{Colors.RESET}"
+                            )
+                    else:
+                        if w >= 0.99:
+                            row_cells.append(cell_raw)
+                        else:
+                            star_txt = (cell + "*")[:4].center(4)
+                            row_cells.append(star_txt)
+                else:
+                    if show_all:
+                        cell_raw = cell.center(4)
+                        row_cells.append(
+                            f"{Colors.DIM}{cell_raw}{Colors.RESET}"
+                            if use_color
+                            else cell_raw
+                        )
+                    else:
+                        empty_txt = " .  "
+                        row_cells.append(
+                            f"{Colors.DIM}{empty_txt}{Colors.RESET}"
+                            if use_color
+                            else empty_txt
+                        )
+
+            idx += 1
+
+        lines.append(f" {row_rk} │ " + " ".join(row_cells) + " │")
+
+    lines.append(bot_line)
+
+    if show_summary:
+        b = live_range.breakdown()
+        lines.append("")
+        tot_c = b["total_combos"]
+        pct_all = b["percentage_of_all"]
+        c_count = b["total_cells"]
+
+        summary_header = (
+            f"  Range Summary: {tot_c:.1f} / 1326 combos ({pct_all:.2f}%) across {c_count} / 169 hands"
+        )
+        if use_color:
+            summary_header = f"{Colors.BOLD}{summary_header}{Colors.RESET}"
+        lines.append(summary_header)
+
+        p = b["pairs"]
+        s = b["suited"]
+        o = b["offsuit"]
+
+        pair_lbl = colorize("Pairs:  ", Colors.BRIGHT_YELLOW, enable=use_color)
+        suited_lbl = colorize("Suited: ", Colors.BRIGHT_CYAN, enable=use_color)
+        offsuit_lbl = colorize("Offsuit:", Colors.BRIGHT_GREEN, enable=use_color)
+
+        lines.append(
+            f"    {pair_lbl} {p['combos']:5.1f} / 78 combos ({p['percentage']:5.1f}%) in {p['cells']:2d}/13 hands"
+        )
+        lines.append(
+            f"    {suited_lbl} {s['combos']:5.1f} / 312 combos ({s['percentage']:5.1f}%) in {s['cells']:2d}/78 hands"
+        )
+        lines.append(
+            f"    {offsuit_lbl} {o['combos']:5.1f} / 936 combos ({o['percentage']:5.1f}%) in {o['cells']:2d}/78 hands"
+        )
+
+        if all_dead:
+            dead_str = format_cards_colored(all_dead, enable=use_color)
+            removed = range_obj.total_combos - live_range.total_combos
+            lines.append(
+                f"    Blockers: [{dead_str}] ({removed:.1f} combos removed by blockers)"
+            )
+
+        if norm_mode in ("weights", "pct", "percent"):
+            lines.append("  Legend: Numbers represent inclusion percentage [0 - 100%]")
+        elif norm_mode == "combos":
+            lines.append("  Legend: Numbers represent active combination count")
+        elif norm_mode in ("heat", "shading", "shade"):
+            lines.append("  Legend: [██] 100%  [▓▓] 70-99%  [▒▒] 40-69%  [░░] 1-39%  [.] 0%")
+        else:
+            if use_color:
+                l_p = f"{Colors.BRIGHT_YELLOW}Pairs{Colors.RESET}"
+                l_s = f"{Colors.BRIGHT_CYAN}Suited{Colors.RESET}"
+                l_o = f"{Colors.BRIGHT_GREEN}Offsuit{Colors.RESET}"
+                l_w = f"{Colors.BRIGHT_MAGENTA}Partial Weight{Colors.RESET}"
+                lines.append(f"  Legend: [{l_p}] [{l_s}] [{l_o}] [{l_w}] [.] Excluded")
+            else:
+                lines.append("  Legend: Hands in range shown; [*] Partial weight; [.] Excluded")
+
+    return "\n".join(lines)
+
+
+def format_range_comparison_matrix(
+    hero_range: Range,
+    villain_range: Range,
+    use_color: bool = True,
+    show_all: bool = False,
+    title: str | None = None,
+    board_cards: Sequence[Card] | None = None,
+    dead_cards: Sequence[Card] | None = None,
+    show_summary: bool = True,
+) -> str:
+    """Format a 13x13 starting hand grid comparing two ranges.
+
+    Cells are marked with:
+    - ``=`` (Cyan): Hands included in both Hero and Villain ranges (Overlap).
+    - ``+`` (Green): Hands included in Hero's range only.
+    - ``-`` (Red): Hands included in Villain's range only.
+    - ``.`` (Dim): Hands not included in either range.
+
+    Parameters
+    ----------
+    hero_range : Range
+        The Hero range.
+    villain_range : Range
+        The Villain range.
+    use_color : bool, default=True
+        Whether to use ANSI color codes.
+    show_all : bool, default=False
+        Whether to show dim hand names for unselected cells.
+    title : str | None, default=None
+        Optional title above the grid.
+    board_cards : Sequence[Card] | None, default=None
+        Community cards acting as blockers.
+    dead_cards : Sequence[Card] | None, default=None
+        Dead cards acting as blockers.
+    show_summary : bool, default=True
+        Whether to append comparison summary statistics.
+
+    Returns
+    -------
+    str
+        Formatted multiline terminal string.
+
+    Examples
+    --------
+    >>> from poker_equity.range import Range
+    >>> h = Range.from_str("AA, KK")
+    >>> v = Range.from_str("KK, QQ")
+    >>> cmp_str = format_range_comparison_matrix(h, v, use_color=False)
+    >>> "+AA" in cmp_str
+    True
+    >>> "=KK" in cmp_str
+    True
+    >>> "-QQ" in cmp_str
+    True
+    """
+    all_dead = list(board_cards or []) + list(dead_cards or [])
+    if all_dead:
+        h_live = hero_range.remove_dead_cards(all_dead)
+        v_live = villain_range.remove_dead_cards(all_dead)
+    else:
+        h_live = hero_range
+        v_live = villain_range
+
+    h_matrix = h_live.to_matrix(include_zeros=True)
+    v_matrix = v_live.to_matrix(include_zeros=True)
+
+    lines: list[str] = []
+    if title:
+        title_colored = (
+            f"{Colors.BOLD}{Colors.CYAN}{title}{Colors.RESET}"
+            if use_color
+            else title
+        )
+        lines.append(title_colored)
+
+    header = "     " + " ".join(rk.center(4) for rk in GRID_RANKS)
+    top_line = "   ┌" + ("─" * 66) + "┐"
+    bot_line = "   └" + ("─" * 66) + "┘"
+
+    lines.append(header)
+    lines.append(top_line)
+
+    overlap_cells_list: list[str] = []
+    h_only_cells_list: list[str] = []
+    v_only_cells_list: list[str] = []
+
+    idx = 0
+    for row_rk in GRID_RANKS:
+        row_cells: list[str] = []
+        for col_rk in GRID_RANKS:
+            cell = HAND_GRID_CELLS[idx]
+            wh = h_matrix.get(cell, 0.0)
+            wv = v_matrix.get(cell, 0.0)
+
+            if wh > 0.0 and wv > 0.0:
+                overlap_cells_list.append(cell)
+                txt = f"={cell:<3}"
+                row_cells.append(
+                    f"{Colors.BOLD}{Colors.BRIGHT_CYAN}{txt}{Colors.RESET}"
+                    if use_color
+                    else txt
+                )
+            elif wh > 0.0:
+                h_only_cells_list.append(cell)
+                txt = f"+{cell:<3}"
+                row_cells.append(
+                    f"{Colors.BOLD}{Colors.BRIGHT_GREEN}{txt}{Colors.RESET}"
+                    if use_color
+                    else txt
+                )
+            elif wv > 0.0:
+                v_only_cells_list.append(cell)
+                txt = f"-{cell:<3}"
+                row_cells.append(
+                    f"{Colors.BOLD}{Colors.BRIGHT_RED}{txt}{Colors.RESET}"
+                    if use_color
+                    else txt
+                )
+            else:
+                if show_all:
+                    cell_raw = cell.center(4)
+                    row_cells.append(
+                        f"{Colors.DIM}{cell_raw}{Colors.RESET}"
+                        if use_color
+                        else cell_raw
+                    )
+                else:
+                    empty_txt = " .  "
+                    row_cells.append(
+                        f"{Colors.DIM}{empty_txt}{Colors.RESET}"
+                        if use_color
+                        else empty_txt
+                    )
+
+            idx += 1
+
+        lines.append(f" {row_rk} │ " + " ".join(row_cells) + " │")
+
+    lines.append(bot_line)
+
+    if show_summary:
+        lines.append("")
+        h_combos = h_live.total_combos
+        v_combos = v_live.total_combos
+        overlap_r = h_live.intersection(v_live)
+        h_only_r = h_live.difference(v_live)
+        v_only_r = v_live.difference(h_live)
+
+        overlap_combos = overlap_r.total_combos
+        h_only_combos = h_only_r.total_combos
+        v_only_combos = v_only_r.total_combos
+
+        header_str = "  Range Comparison: Hero vs Villain"
+        if use_color:
+            header_str = f"{Colors.BOLD}{header_str}{Colors.RESET}"
+        lines.append(header_str)
+
+        h_lbl = colorize("Hero:        ", Colors.BRIGHT_GREEN, enable=use_color)
+        v_lbl = colorize("Villain:     ", Colors.BRIGHT_RED, enable=use_color)
+        both_lbl = colorize("Both/Overlap:", Colors.BRIGHT_CYAN, enable=use_color)
+        ho_lbl = colorize("Hero Only:   ", Colors.BRIGHT_GREEN, enable=use_color)
+        vo_lbl = colorize("Villain Only:", Colors.BRIGHT_RED, enable=use_color)
+
+        lines.append(
+            f"    {h_lbl} {h_combos:5.1f} combos ({h_combos / 1326 * 100:5.2f}%) across {len(h_only_cells_list) + len(overlap_cells_list)} hands"
+        )
+        lines.append(
+            f"    {v_lbl} {v_combos:5.1f} combos ({v_combos / 1326 * 100:5.2f}%) across {len(v_only_cells_list) + len(overlap_cells_list)} hands"
+        )
+        lines.append(
+            f"    {both_lbl} {overlap_combos:5.1f} combos ({len(overlap_cells_list)} hands shared)"
+        )
+        lines.append(
+            f"    {ho_lbl} {h_only_combos:5.1f} combos ({len(h_only_cells_list)} hands exclusive)"
+        )
+        lines.append(
+            f"    {vo_lbl} {v_only_combos:5.1f} combos ({len(v_only_cells_list)} hands exclusive)"
+        )
+
+        if all_dead:
+            dead_str = format_cards_colored(all_dead, enable=use_color)
+            lines.append(f"    Blockers: [{dead_str}]")
+
+        if use_color:
+            l_plus = f"{Colors.BRIGHT_GREEN}[+] Hero Only{Colors.RESET}"
+            l_minus = f"{Colors.BRIGHT_RED}[-] Villain Only{Colors.RESET}"
+            l_eq = f"{Colors.BRIGHT_CYAN}[=] Overlap (Both){Colors.RESET}"
+            lines.append(f"  Legend: {l_plus}  {l_minus}  {l_eq}  [.] Neither")
+        else:
+            lines.append(
+                "  Legend: [+] Hero Only  [-] Villain Only  [=] Overlap (Both)  [.] Neither"
+            )
+
+    return "\n".join(lines)
+
+
+def get_range_matrix_dict(
+    range_obj: Range,
+    spec: str = "",
+    board_cards: Sequence[Card] | None = None,
+    dead_cards: Sequence[Card] | None = None,
+) -> dict[str, Any]:
+    """Build a JSON-serializable dictionary of range matrix data.
+
+    Parameters
+    ----------
+    range_obj : Range
+        Range object to inspect.
+    spec : str, default=""
+        Original input specification string.
+    board_cards : Sequence[Card] | None, default=None
+        Community cards acting as blockers.
+    dead_cards : Sequence[Card] | None, default=None
+        Dead cards acting as blockers.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionary with grid cells, weights, combo counts, and breakdown.
+    """
+    all_dead = list(board_cards or []) + list(dead_cards or [])
+    if all_dead:
+        live_range = range_obj.remove_dead_cards(all_dead)
+    else:
+        live_range = range_obj
+
+    b = live_range.breakdown()
+    m = live_range.to_matrix(include_zeros=True)
+    c_dict = live_range.to_matrix_combos(include_zeros=True)
+    grid_2d = live_range.to_grid_2d()
+
+    cells_detail: dict[str, dict[str, Any]] = {}
+    for cell in HAND_GRID_CELLS:
+        w = m[cell]
+        cnt = c_dict[cell]
+        if len(cell) == 2:
+            ctype = "pair"
+        elif cell.endswith("s"):
+            ctype = "suited"
+        else:
+            ctype = "offsuit"
+
+        cells_detail[cell] = {
+            "weight": round(w, 4),
+            "combos": round(cnt, 2),
+            "type": ctype,
+        }
+
+    return {
+        "spec": spec,
+        "total_combos": b["total_combos"],
+        "percentage_of_hands": round(b["percentage_of_all"] / 100.0, 4),
+        "percentage_pct": b["percentage_of_all"],
+        "included_cells_count": b["total_cells"],
+        "breakdown": b,
+        "grid": grid_2d,
+        "cells": cells_detail,
+        "blockers": [str(c) for c in all_dead],
+    }
+
+
+def handle_matrix_command(args: argparse.Namespace, use_color: bool = True) -> int:
+    """Execute the 'matrix' / 'grid' subcommand."""
+    pos_ranges = getattr(args, "ranges", None) or []
+    hero_arg = getattr(args, "hero", None)
+    villain_arg = getattr(args, "villain", None)
+
+    # Determine hero and villain
+    if len(pos_ranges) >= 2:
+        hero_raw, villain_raw = pos_ranges[0], pos_ranges[1]
+    elif len(pos_ranges) == 1 and villain_arg:
+        hero_raw, villain_raw = pos_ranges[0], villain_arg
+    elif hero_arg and villain_arg:
+        hero_raw, villain_raw = hero_arg, villain_arg
+    elif len(pos_ranges) == 1:
+        hero_raw, villain_raw = pos_ranges[0], None
+    elif hero_arg:
+        hero_raw, villain_raw = hero_arg, None
+    else:
+        sys.stderr.write(
+            "Error: Must specify at least one range to visualize (e.g. 'poker-equity matrix \"top15%\"').\n"
+        )
+        return 2
+
+    # Parse board cards
+    try:
+        board_cards = (
+            parse_cards_flexible(getattr(args, "board", None))
+            if getattr(args, "board", None)
+            else []
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing board cards '{args.board}': {exc}\n")
+        return 2
+
+    # Parse dead cards
+    try:
+        dead_cards = (
+            parse_cards_flexible(getattr(args, "dead", None))
+            if getattr(args, "dead", None)
+            else []
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing dead cards '{args.dead}': {exc}\n")
+        return 2
+
+    # Parse hero range
+    try:
+        hero_item = parse_range_or_preset(hero_raw)
+        hero_range = Range([hero_item]) if isinstance(hero_item, tuple) else hero_item
+    except Exception as exc:
+        sys.stderr.write(f"Error parsing range '{hero_raw}': {exc}\n")
+        return 2
+
+    # Parse villain range if given
+    villain_range: Range | None = None
+    if villain_raw:
+        try:
+            villain_item = parse_range_or_preset(villain_raw)
+            villain_range = (
+                Range([villain_item]) if isinstance(villain_item, tuple) else villain_item
+            )
+        except Exception as exc:
+            sys.stderr.write(f"Error parsing range '{villain_raw}': {exc}\n")
+            return 2
+
+    mode = getattr(args, "mode", "hands") or "hands"
+    show_all = getattr(args, "show_all", False)
+    show_summary = getattr(args, "summary", True)
+
+    if getattr(args, "json", False):
+        hero_data = get_range_matrix_dict(
+            hero_range, spec=hero_raw, board_cards=board_cards, dead_cards=dead_cards
+        )
+        if villain_range is not None:
+            villain_data = get_range_matrix_dict(
+                villain_range,
+                spec=villain_raw,
+                board_cards=board_cards,
+                dead_cards=dead_cards,
+            )
+            all_dead = list(board_cards) + list(dead_cards)
+            h_live = (
+                hero_range.remove_dead_cards(all_dead) if all_dead else hero_range
+            )
+            v_live = (
+                villain_range.remove_dead_cards(all_dead)
+                if all_dead
+                else villain_range
+            )
+            overlap = h_live.intersection(v_live)
+            h_only = h_live.difference(v_live)
+            v_only = v_live.difference(h_live)
+
+            m_h = h_live.to_matrix(include_zeros=True)
+            m_v = v_live.to_matrix(include_zeros=True)
+            overlap_cells = [c for c in HAND_GRID_CELLS if m_h[c] > 0 and m_v[c] > 0]
+            h_only_cells = [c for c in HAND_GRID_CELLS if m_h[c] > 0 and m_v[c] == 0]
+            v_only_cells = [c for c in HAND_GRID_CELLS if m_h[c] == 0 and m_v[c] > 0]
+
+            out = {
+                "hero": hero_data,
+                "villain": villain_data,
+                "comparison": {
+                    "overlap_combos": overlap.total_combos,
+                    "hero_only_combos": h_only.total_combos,
+                    "villain_only_combos": v_only.total_combos,
+                    "overlap_cells": overlap_cells,
+                    "hero_only_cells": h_only_cells,
+                    "villain_only_cells": v_only_cells,
+                },
+            }
+        else:
+            out = hero_data
+        print(json.dumps(out, indent=2))
+        return 0
+
+    # Terminal output
+    if villain_range is not None:
+        title = f"Range Comparison: Hero ({hero_raw}) vs Villain ({villain_raw})"
+        grid_str = format_range_comparison_matrix(
+            hero_range=hero_range,
+            villain_range=villain_range,
+            use_color=use_color,
+            show_all=show_all,
+            title=title,
+            board_cards=board_cards,
+            dead_cards=dead_cards,
+            show_summary=show_summary,
+        )
+        print(grid_str)
+    else:
+        title = f"Range Matrix: {hero_raw}"
+        grid_str = format_range_matrix(
+            range_obj=hero_range,
+            use_color=use_color,
+            mode=mode,
+            show_all=show_all,
+            title=title,
+            board_cards=board_cards,
+            dead_cards=dead_cards,
+            show_summary=show_summary,
+        )
+        print(grid_str)
+
+    return 0
+
+
 def handle_range_command(args: argparse.Namespace, use_color: bool = True) -> int:
     """Execute the 'range' subcommand."""
-    # Resolve hero and villain input
     pos_ranges = getattr(args, "ranges", None) or []
+    has_matrix = getattr(args, "matrix", False)
+
+    # Route single-range matrix requests directly to handle_matrix_command
+    if has_matrix:
+        if len(pos_ranges) == 1 and not getattr(args, "villain", None):
+            return handle_matrix_command(args, use_color=use_color)
+        if getattr(args, "hero", None) and not getattr(args, "villain", None) and len(pos_ranges) == 0:
+            return handle_matrix_command(args, use_color=use_color)
+
+    # Resolve hero and villain input
     if len(pos_ranges) >= 2:
         hero_raw, villain_raw = pos_ranges[0], pos_ranges[1]
     elif getattr(args, "hero", None) and getattr(args, "villain", None):
@@ -1794,10 +2603,36 @@ def handle_range_command(args: argparse.Namespace, use_color: bool = True) -> in
         }
         if breakdown_list:
             data["breakdown"] = breakdown_list
+        if has_matrix:
+            h_range_obj = Range([hero_item]) if isinstance(hero_item, tuple) else hero_item
+            v_range_obj = Range([villain_item]) if isinstance(villain_item, tuple) else villain_item
+            data["hero_matrix"] = get_range_matrix_dict(
+                h_range_obj, spec=hero_raw, board_cards=board_cards, dead_cards=dead_cards
+            )
+            data["villain_matrix"] = get_range_matrix_dict(
+                v_range_obj, spec=villain_raw, board_cards=board_cards, dead_cards=dead_cards
+            )
         print(json.dumps(data, indent=2))
         return 0
 
     # Human-readable formatted terminal output
+    if has_matrix:
+        h_range_obj = Range([hero_item]) if isinstance(hero_item, tuple) else hero_item
+        v_range_obj = Range([villain_item]) if isinstance(villain_item, tuple) else villain_item
+        print(
+            format_range_comparison_matrix(
+                hero_range=h_range_obj,
+                villain_range=v_range_obj,
+                use_color=use_color,
+                show_all=getattr(args, "show_all", False),
+                title=f"Range Comparison Matrix: Hero ({hero_raw}) vs Villain ({villain_raw})",
+                board_cards=board_cards,
+                dead_cards=dead_cards,
+                show_summary=True,
+            )
+        )
+        print()
+
     if elapsed < 0.001:
         time_str = f"{elapsed * 1_000_000:.0f} µs"
     elif elapsed < 1.0:
@@ -3835,6 +4670,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return handle_range_command(args, use_color=use_color)
         elif args.command in ("twice", "rit", "run-it-twice"):
             return handle_twice_command(args, use_color=use_color)
+        elif args.command in ("matrix", "grid", "matrix13"):
+            return handle_matrix_command(args, use_color=use_color)
         else:
             parser.print_help()
             return 1
