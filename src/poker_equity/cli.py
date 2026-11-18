@@ -715,7 +715,7 @@ def create_parser() -> argparse.ArgumentParser:
         "-V",
         type=str,
         default=None,
-        help="Villain range string (e.g. 'TT+, AJs+, KQs', '25%').",
+        help="Villain range string (e.g. 'TT+, AJs+, KQs', '25%%').",
     )
     p_rng.add_argument(
         "--board",
@@ -835,6 +835,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     p_odds.add_argument(
         "--future-bets",
+        "--implied",
         "-f",
         type=float,
         default=0.0,
@@ -842,6 +843,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     p_odds.add_argument(
         "--future-losses",
+        "--reverse-implied",
         "-l",
         type=float,
         default=0.0,
@@ -1274,14 +1276,14 @@ def create_parser() -> argparse.ArgumentParser:
         "-H",
         type=str,
         default=None,
-        help="Hero hand or range string (e.g. 'TT+, AJs+', 'top15%').",
+        help="Hero hand or range string (e.g. 'TT+, AJs+', 'top15%%').",
     )
     p_mat.add_argument(
         "--villain",
         "-V",
         type=str,
         default=None,
-        help="Villain range string for comparison (e.g. '25%').",
+        help="Villain range string for comparison (e.g. '25%%').",
     )
     p_mat.add_argument(
         "--board",
@@ -3029,7 +3031,10 @@ def handle_outs_command(args: argparse.Namespace, use_color: bool = True) -> int
 
     # Positional resolution
     if cards_pos:
-        if len(cards_pos) == 3:
+        if len(cards_pos) == 2:
+            hero_raw = hero_raw or cards_pos[0]
+            villain_raw = villain_raw or cards_pos[1]
+        elif len(cards_pos) == 3:
             hero_raw = hero_raw or cards_pos[0]
             villain_raw = villain_raw or cards_pos[1]
             board_raw = board_raw or cards_pos[2]
@@ -4319,7 +4324,10 @@ def handle_curve_command(args: argparse.Namespace, use_color: bool = True) -> in
 
     # Positional resolution
     if cards_pos:
-        if len(cards_pos) == 3:
+        if len(cards_pos) == 2:
+            hero_raw = hero_raw or cards_pos[0]
+            villain_raw = villain_raw or cards_pos[1]
+        elif len(cards_pos) == 3:
             hero_raw = hero_raw or cards_pos[0]
             villain_raw = villain_raw or cards_pos[1]
             board_raw = board_raw or cards_pos[2]
