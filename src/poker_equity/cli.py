@@ -2944,7 +2944,7 @@ def handle_odds_command(args: argparse.Namespace, use_color: bool = True) -> int
     print(f"Pot Size        : {pot:.2f} chips")
     print(f"Cost to Call    : {call:.2f} chips")
     print(f"Total Pot       : {pot + call:.2f} chips")
-    print(f"Pot Odds        : {colorize(f'{req_odds * 100:.2f}%', Colors.CYAN, use_color)} ({ratio})")
+    print(f"Pot Odds        : {colorize(f'{req_odds * 100:.2f}%', Colors.CYAN, use_color)} ({ratio_str})")
 
     if future_bets > 0 and imp_odds is not None:
         print(f"Future Bets     : +{future_bets:.2f} chips anticipated")
